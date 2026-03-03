@@ -216,16 +216,29 @@ app.post('/api/create-order', paymentLimiter, validateOrigin, async (req, res, n
       return res.status(500).json({ error: 'Failed to create Razorpay order' });
     }
 
-    const donation = await prisma.donation.create({
-      data: {
-        donor_name: sanitizedName,
-        email: sanitizedEmail,
-        amount: sanitizedAmount,
-        currency,
-        razorpay_order_id: order.id,
-        status: 'pending'
+    // Add retry loop for Neon Scale-to-Zero cold starts
+    let donation;
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        donation = await prisma.donation.create({
+          data: {
+            donor_name: sanitizedName,
+            email: sanitizedEmail,
+            amount: sanitizedAmount,
+            currency,
+            razorpay_order_id: order.id,
+            status: 'pending'
+          }
+        });
+        break; // Success
+      } catch (dbErr) {
+        retries--;
+        if (retries === 0) throw dbErr;
+        logger.warn(`Database connection sleeping, retrying creation... (${retries} attempts left)`);
+        await new Promise(res => setTimeout(res, 1000)); // Wait 1s for Neon to wake up
       }
-    });
+    }
 
     logger.info(`Order created: ${order.id} for ${sanitizedEmail} — ₹${sanitizedAmount}`);
 
