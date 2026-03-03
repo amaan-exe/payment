@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { Sequelize, DataTypes } = require('sequelize');
+const { PrismaClient } = require('@prisma/client');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
@@ -97,63 +97,11 @@ function adminAuth(req, res, next) {
 }
 
 // ========================
-// Database
+// Database (Prisma Native)
 // ========================
-const sequelize = new Sequelize(process.env.DATABASE_URL, {
-  dialect: 'postgres',
-  logging: isProduction ? false : (msg) => logger.debug(msg),
-  ...(isProduction && {
-    dialectOptions: {
-      ssl: {
-        require: true,
-        rejectUnauthorized: false
-      }
-    }
-  })
+const prisma = new PrismaClient({
+  log: isProduction ? ['error'] : ['query', 'info', 'warn', 'error'],
 });
-
-const Donation = sequelize.define('Donation', {
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: DataTypes.UUIDV4,
-    primaryKey: true
-  },
-  donor_name: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  email: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  amount: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: false
-  },
-  currency: {
-    type: DataTypes.STRING,
-    defaultValue: 'INR'
-  },
-  razorpay_order_id: {
-    type: DataTypes.STRING
-  },
-  razorpay_payment_id: {
-    type: DataTypes.STRING
-  },
-  status: {
-    type: DataTypes.ENUM('pending', 'success', 'failed'),
-    defaultValue: 'pending'
-  }
-}, {
-  timestamps: true,
-  createdAt: 'created_at',
-  updatedAt: false
-});
-
-// In production: don't auto-alter tables. In dev: sync schema.
-sequelize.sync({ alter: !isProduction })
-  .then(() => logger.info('Database schema synchronized'))
-  .catch(err => logger.error('Failed to sync database:', err));
 
 // ========================
 // Razorpay
@@ -268,13 +216,15 @@ app.post('/api/create-order', paymentLimiter, validateOrigin, async (req, res, n
       return res.status(500).json({ error: 'Failed to create Razorpay order' });
     }
 
-    const donation = await Donation.create({
-      donor_name: sanitizedName,
-      email: sanitizedEmail,
-      amount: sanitizedAmount,
-      currency,
-      razorpay_order_id: order.id,
-      status: 'pending'
+    const donation = await prisma.donation.create({
+      data: {
+        donor_name: sanitizedName,
+        email: sanitizedEmail,
+        amount: sanitizedAmount,
+        currency,
+        razorpay_order_id: order.id,
+        status: 'pending'
+      }
     });
 
     logger.info(`Order created: ${order.id} for ${sanitizedEmail} — ₹${sanitizedAmount}`);
@@ -310,12 +260,12 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
     const isAuthentic = expectedSignature === razorpay_signature;
 
     if (isAuthentic) {
-      await Donation.update(
-        { razorpay_payment_id, status: 'success' },
-        { where: { razorpay_order_id } }
-      );
+      await prisma.donation.updateMany({
+        where: { razorpay_order_id },
+        data: { razorpay_payment_id, status: 'success' }
+      });
 
-      const donation = await Donation.findOne({ where: { razorpay_order_id } });
+      const donation = await prisma.donation.findFirst({ where: { razorpay_order_id } });
       if (donation) {
         sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
       }
@@ -323,10 +273,10 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       logger.info(`Payment verified: ${razorpay_payment_id} for order ${razorpay_order_id}`);
       res.status(200).json({ success: true, message: 'Payment successfully verified' });
     } else {
-      await Donation.update(
-        { status: 'failed' },
-        { where: { razorpay_order_id } }
-      );
+      await prisma.donation.updateMany({
+        where: { razorpay_order_id },
+        data: { status: 'failed' }
+      });
 
       logger.warn(`Payment verification failed — invalid signature for order ${razorpay_order_id}`);
       res.status(400).json({ success: false, message: 'Invalid Signature' });
@@ -339,13 +289,17 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
 // Live Stats (public)
 app.get('/api/stats', async (req, res, next) => {
   try {
-    const totalRaised = await Donation.sum('amount', { where: { status: 'success' } }) || 0;
-    const totalDonations = await Donation.count({ where: { status: 'success' } });
-    const totalDonors = await Donation.count({
+    const aggregations = await prisma.donation.aggregate({
       where: { status: 'success' },
-      distinct: true,
-      col: 'email'
+      _sum: { amount: true }
     });
+    const totalRaised = aggregations._sum.amount ? parseFloat(aggregations._sum.amount) : 0;
+    const totalDonations = await prisma.donation.count({ where: { status: 'success' } });
+    const donorsCount = await prisma.donation.groupBy({
+      by: ['email'],
+      where: { status: 'success' },
+    });
+    const totalDonors = donorsCount.length;
 
     res.json({
       totalRaised: parseFloat(totalRaised),
@@ -366,9 +320,9 @@ app.get('/api/donations', adminAuth, async (req, res, next) => {
       where.status = status;
     }
 
-    const donations = await Donation.findAll({
+    const donations = await prisma.donation.findMany({
       where,
-      order: [['created_at', 'DESC']]
+      orderBy: { created_at: 'desc' }
     });
 
     res.json(donations);

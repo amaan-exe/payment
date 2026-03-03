@@ -4,3 +4,5 @@ node_modules
 .DS_Store
 error.log
 combined.log
+
+/generated/prisma

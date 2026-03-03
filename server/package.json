@@ -12,6 +12,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "@prisma/client": "^6.3.1",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
@@ -19,9 +21,10 @@
     "helmet": "^8.1.0",
     "nodemailer": "^8.0.1",
     "pg": "^8.19.0",
-    "pg-hstore": "^2.3.4",
     "razorpay": "^2.9.6",
-    "sequelize": "^6.37.7",
     "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "prisma": "^6.3.1"
   }
 }
