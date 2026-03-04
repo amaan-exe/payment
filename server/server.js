@@ -7,7 +7,7 @@ const prisma = require('./prisma');
 const { withRetry } = require('./db');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const winston = require('winston');
 const cron = require('node-cron');
 const jwt = require('jsonwebtoken');
@@ -187,26 +187,21 @@ const razorpay = new Razorpay({
 });
 
 // ========================
-// Email
+// Email (Resend HTTP API)
 // ========================
-let transporter = null;
-if (process.env.SMTP_EMAIL && process.env.SMTP_PASSWORD) {
-  transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
-    family: 4, // Force IPv4 — server host does not support IPv6 (ENETUNREACH on 2404:6800:...)
-    auth: {
-      user: process.env.SMTP_EMAIL,
-      pass: process.env.SMTP_PASSWORD.replace(/\s/g, ''),
-    },
-  });
-  logger.info('Email transporter configured (family:4 / IPv4)');
+let resendClient = null;
+if (process.env.RESEND_API_KEY) {
+  resendClient = new Resend(process.env.RESEND_API_KEY);
+  logger.info('Email client configured (Resend API)');
 }
 
 // FIX #15: Track email failures and log them
 async function sendReceiptEmail(donorName, email, amount, paymentId) {
-  if (!transporter) return;
+  if (!resendClient) {
+    logger.warn('Email receipt skipped: RESEND_API_KEY not configured.');
+    return;
+  }
+
   try {
     // FIX #6: Sanitize all user-supplied values before injecting into HTML
     const safeName = escapeHtml(donorName);
@@ -214,8 +209,10 @@ async function sendReceiptEmail(donorName, email, amount, paymentId) {
     const safeAmount = escapeHtml(String(amount));
     const safePaymentId = escapeHtml(paymentId);
 
-    await transporter.sendMail({
-      from: `"DEMO NGO" <${process.env.SMTP_EMAIL}>`,
+    const fromAddress = process.env.RESEND_FROM_EMAIL || 'DEMO NGO <onboarding@resend.dev>';
+
+    await resendClient.emails.send({
+      from: fromAddress,
       to: email,
       subject: 'Thank you for your donation! — DEMO NGO',
       html: `

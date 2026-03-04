@@ -22,9 +22,9 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "node-cron": "^4.2.1",
-    "nodemailer": "^8.0.1",
     "pg": "^8.19.0",
     "razorpay": "^2.9.6",
+    "resend": "^6.9.3",
     "winston": "^3.19.0"
   },
   "devDependencies": {
