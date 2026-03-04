@@ -7,7 +7,9 @@ import './index.css'
 import App from './App.jsx'
 
 // Set default base URL for production APIs (Render backend)
-axios.defaults.baseURL = import.meta.env.VITE_API_URL || '';
+// In production (Vercel), VITE_API_URL must be set to the backend URL.
+// In local development, it falls back to the Express server port 5000.
+axios.defaults.baseURL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
