@@ -19,14 +19,16 @@ model Donation {
   email               String
   amount              Decimal  @db.Decimal(10, 2)
   currency            String   @default("INR")
-  razorpay_order_id   String?
-  razorpay_payment_id String?
+  razorpay_order_id   String?  @unique
+  razorpay_payment_id String?  @unique
   status              Status   @default(pending)
+  event_log           Json?    @default("[]")
   created_at          DateTime @default(now())
 }
 
 enum Status {
   pending
+  authorized
   success
   failed
 }

@@ -22,13 +22,13 @@ function App() {
   ];
 
   return (
-    <div className="min-h-screen font-sans bg-gray-50 selection:bg-blue-100 flex flex-col">
+    <div className="min-h-screen font-sans bg-gray-50 selection:bg-rose-100 flex flex-col">
 
       {/* Navbar */}
       <nav className="bg-white/80 backdrop-blur-md sticky top-0 z-50 border-b border-gray-100">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2 group">
-            <HandHeart className="h-8 w-8 text-blue-600 group-hover:scale-110 transition-transform" />
+            <HandHeart className="h-8 w-8 text-rose-600 group-hover:scale-110 transition-transform" />
             <span className="font-bold text-xl tracking-tight text-gray-900">DEMO NGO</span>
           </Link>
 
@@ -39,8 +39,8 @@ function App() {
                 key={link.to}
                 to={link.to}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${location.pathname === link.to
-                  ? 'bg-blue-50 text-blue-600'
-                  : 'text-gray-600 hover:text-blue-600 hover:bg-gray-50'
+                  ? 'bg-rose-50 text-rose-600'
+                  : 'text-gray-600 hover:text-rose-600 hover:bg-gray-50'
                   }`}
               >
                 {link.label}
@@ -48,7 +48,7 @@ function App() {
             ))}
             <Link
               to="/"
-              className="ml-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-5 py-2 rounded-full text-sm font-semibold hover:shadow-lg hover:shadow-blue-200 transition-all"
+              className="ml-3 bg-gradient-to-r from-rose-600 to-red-600 text-white px-5 py-2 rounded-full text-sm font-semibold hover:shadow-lg hover:shadow-rose-200 transition-all"
             >
               Donate
             </Link>
@@ -72,7 +72,7 @@ function App() {
                 to={link.to}
                 onClick={() => setMobileMenuOpen(false)}
                 className={`block px-4 py-2.5 rounded-lg text-sm font-medium transition ${location.pathname === link.to
-                  ? 'bg-blue-50 text-blue-600'
+                  ? 'bg-rose-50 text-rose-600'
                   : 'text-gray-600 hover:bg-gray-50'
                   }`}
               >

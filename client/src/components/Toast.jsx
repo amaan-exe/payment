@@ -55,7 +55,7 @@ function ToastItem({ toast, onClose }) {
             icon: <AlertCircle className="h-5 w-5 text-white shrink-0" />,
         },
         info: {
-            bg: 'bg-gradient-to-r from-blue-500 to-indigo-600',
+            bg: 'bg-gradient-to-r from-rose-500 to-red-600',
             icon: <Info className="h-5 w-5 text-white shrink-0" />,
         },
     };

@@ -20,9 +20,10 @@ function AdminLogin({ onLogin }) {
         setError('');
         try {
             const res = await axios.post('/api/admin/login', { password });
-            if (res.data.success) {
-                sessionStorage.setItem('adminAuth', password);
-                onLogin(password);
+            if (res.data.success && res.data.token) {
+                // FIX #4: Store JWT token, NOT the raw password
+                sessionStorage.setItem('adminToken', res.data.token);
+                onLogin(res.data.token);
             }
         } catch (err) {
             setError('Invalid password. Please try again.');
@@ -53,7 +54,7 @@ function AdminLogin({ onLogin }) {
                                     type={showPassword ? 'text' : 'password'}
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
-                                    className={`w-full px-4 py-2.5 border rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition pr-11 ${error ? 'border-red-400 bg-red-50' : 'border-gray-200'}`}
+                                    className={`w-full px-4 py-2.5 border rounded-xl focus:ring-2 focus:ring-rose-500 focus:border-rose-500 outline-none transition pr-11 ${error ? 'border-red-400 bg-red-50' : 'border-gray-200'}`}
                                     placeholder="Enter admin password"
                                     autoFocus
                                 />
@@ -90,33 +91,40 @@ function AdminLogin({ onLogin }) {
 }
 
 export default function AdminPage() {
-    const [adminPassword, setAdminPassword] = useState(sessionStorage.getItem('adminAuth') || '');
+    // FIX #4: Read JWT token from sessionStorage instead of raw password
+    const [adminToken, setAdminToken] = useState(sessionStorage.getItem('adminToken') || '');
     const [donations, setDonations] = useState([]);
+    const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
+    const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState('all');
     const [stats, setStats] = useState({ totalRaised: 0, totalDonations: 0, totalDonors: 0 });
     const [authError, setAuthError] = useState(false);
 
-    const isAuthenticated = !!adminPassword && !authError;
+    const isAuthenticated = !!adminToken && !authError;
 
     const fetchData = async () => {
         setLoading(true);
         try {
-            const params = filter !== 'all' ? `?status=${filter}` : '';
+            const queryParams = new URLSearchParams({ page: page.toString(), limit: '50' });
+            if (filter !== 'all') queryParams.append('status', filter);
+
             const [donationsRes, statsRes] = await Promise.all([
-                axios.get(`/api/donations${params}`, {
-                    headers: { 'x-admin-password': adminPassword }
+                axios.get(`/api/donations?${queryParams.toString()}`, {
+                    // FIX #4: Send JWT token as Bearer header instead of raw password
+                    headers: { 'Authorization': `Bearer ${adminToken}` }
                 }),
                 axios.get('/api/stats'),
             ]);
-            setDonations(donationsRes.data);
+            setDonations(donationsRes.data.data);
+            setPagination(donationsRes.data.pagination);
             setStats(statsRes.data);
             setAuthError(false);
         } catch (err) {
             if (err.response?.status === 401) {
                 setAuthError(true);
-                sessionStorage.removeItem('adminAuth');
-                setAdminPassword('');
+                sessionStorage.removeItem('adminToken');
+                setAdminToken('');
             }
             console.error('Failed to fetch data:', err);
         } finally {
@@ -130,16 +138,21 @@ export default function AdminPage() {
         } else {
             setLoading(false);
         }
-    }, [filter, isAuthenticated]);
+    }, [filter, page, isAuthenticated]);
 
-    const handleLogin = (pwd) => {
-        setAdminPassword(pwd);
+    // Reset page when filter changes
+    useEffect(() => {
+        setPage(1);
+    }, [filter]);
+
+    const handleLogin = (token) => {
+        setAdminToken(token);
         setAuthError(false);
     };
 
     const handleLogout = () => {
-        sessionStorage.removeItem('adminAuth');
-        setAdminPassword('');
+        sessionStorage.removeItem('adminToken');
+        setAdminToken('');
         setAuthError(false);
     };
 
@@ -154,7 +167,7 @@ export default function AdminPage() {
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex items-center justify-between mb-6">
                         <div className="flex items-center gap-3">
-                            <Database className="h-8 w-8 text-blue-400" />
+                            <Database className="h-8 w-8 text-rose-400" />
                             <h1 className="text-3xl font-extrabold tracking-tight">Admin Dashboard</h1>
                         </div>
                         <button
@@ -197,8 +210,8 @@ export default function AdminPage() {
                                 key={s}
                                 onClick={() => setFilter(s)}
                                 className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${filter === s
-                                        ? 'bg-blue-600 text-white shadow-sm'
-                                        : 'bg-white text-gray-600 border border-gray-200 hover:border-blue-300'
+                                    ? 'bg-rose-600 text-white shadow-sm'
+                                    : 'bg-white text-gray-600 border border-gray-200 hover:border-rose-300'
                                     }`}
                             >
                                 {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
@@ -207,7 +220,7 @@ export default function AdminPage() {
                     </div>
                     <button
                         onClick={fetchData}
-                        className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:border-blue-300 hover:text-blue-600 transition"
+                        className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:border-rose-300 hover:text-rose-600 transition"
                     >
                         <RefreshCcw className="h-4 w-4" /> Refresh
                     </button>
@@ -219,7 +232,7 @@ export default function AdminPage() {
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     {loading ? (
                         <div className="p-16 text-center">
-                            <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mx-auto mb-4"></div>
+                            <div className="w-8 h-8 border-4 border-rose-200 border-t-rose-600 rounded-full animate-spin mx-auto mb-4"></div>
                             <p className="text-gray-400">Loading donations…</p>
                         </div>
                     ) : donations.length === 0 ? (
@@ -245,7 +258,7 @@ export default function AdminPage() {
                                     {donations.map(d => {
                                         const cfg = STATUS_CONFIG[d.status] || STATUS_CONFIG.pending;
                                         return (
-                                            <tr key={d.id} className="hover:bg-blue-50/30 transition">
+                                            <tr key={d.id} className="hover:bg-rose-50/30 transition">
                                                 <td className="px-6 py-4 font-medium text-gray-900">{d.donor_name}</td>
                                                 <td className="px-6 py-4 text-gray-500">{d.email}</td>
                                                 <td className="px-6 py-4 text-right font-semibold text-gray-900">₹{parseFloat(d.amount).toLocaleString('en-IN')}</td>
@@ -268,9 +281,32 @@ export default function AdminPage() {
                         </div>
                     )}
                 </div>
-                <p className="text-center text-xs text-gray-300 mt-4">
-                    Showing {donations.length} donation{donations.length !== 1 ? 's' : ''}
-                </p>
+
+                {/* Pagination Controls */}
+                {!loading && donations.length > 0 && (
+                    <div className="flex items-center justify-between mt-6 bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                        <p className="text-sm text-gray-500 font-medium">
+                            Showing <span className="font-bold text-gray-900">{donations.length}</span> of <span className="font-bold text-gray-900">{pagination.total}</span> donations
+                        </p>
+                        <div className="flex gap-2">
+                            <button
+                                onClick={() => setPage(p => Math.max(1, p - 1))}
+                                disabled={page === 1}
+                                className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition"
+                            >
+                                Previous
+                            </button>
+                            <span className="px-4 py-2 text-sm font-semibold text-gray-600">Page {page} of {pagination.totalPages}</span>
+                            <button
+                                onClick={() => setPage(p => Math.min(pagination.totalPages, p + 1))}
+                                disabled={page === pagination.totalPages}
+                                className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition"
+                            >
+                                Next
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );

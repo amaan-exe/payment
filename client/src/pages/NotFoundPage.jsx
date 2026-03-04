@@ -10,8 +10,8 @@ export default function NotFoundPage() {
                 <div className="relative mb-8">
                     <span className="text-[150px] font-black text-gray-100 leading-none select-none">404</span>
                     <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="bg-blue-100 p-5 rounded-2xl">
-                            <MapPin className="h-12 w-12 text-blue-600" />
+                        <div className="bg-rose-100 p-5 rounded-2xl">
+                            <MapPin className="h-12 w-12 text-rose-600" />
                         </div>
                     </div>
                 </div>
@@ -24,13 +24,13 @@ export default function NotFoundPage() {
                 <div className="flex flex-col sm:flex-row gap-3 justify-center">
                     <Link
                         to="/"
-                        className="inline-flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-3 rounded-full font-semibold hover:shadow-lg hover:shadow-blue-200 transition-all"
+                        className="inline-flex items-center justify-center gap-2 bg-gradient-to-r from-rose-600 to-red-600 text-white px-6 py-3 rounded-full font-semibold hover:shadow-lg hover:shadow-rose-200 transition-all"
                     >
                         <Home className="h-4 w-4" /> Go to Home
                     </Link>
                     <button
                         onClick={() => window.history.back()}
-                        className="inline-flex items-center justify-center gap-2 border border-gray-200 text-gray-600 px-6 py-3 rounded-full font-medium hover:border-blue-300 hover:text-blue-600 transition"
+                        className="inline-flex items-center justify-center gap-2 border border-gray-200 text-gray-600 px-6 py-3 rounded-full font-medium hover:border-rose-300 hover:text-rose-600 transition"
                     >
                         <ArrowLeft className="h-4 w-4" /> Go Back
                     </button>

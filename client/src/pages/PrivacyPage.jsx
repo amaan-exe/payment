@@ -5,11 +5,11 @@ export default function PrivacyPage() {
     return (
         <div className="min-h-screen bg-gray-50">
             {/* Header Banner */}
-            <section className="py-16 bg-gradient-to-br from-blue-600 to-indigo-700 text-white text-center">
+            <section className="py-16 bg-gradient-to-br from-rose-600 to-red-700 text-white text-center">
                 <div className="max-w-4xl mx-auto px-4">
                     <Shield className="mx-auto h-12 w-12 mb-4 opacity-80" />
                     <h1 className="text-4xl font-extrabold tracking-tight">Privacy Policy</h1>
-                    <p className="text-blue-100 mt-3">Last updated: February 2026</p>
+                    <p className="text-rose-100 mt-3">Last updated: February 2026</p>
                 </div>
             </section>
 
@@ -60,14 +60,14 @@ export default function PrivacyPage() {
                         <div>
                             <h2 className="text-xl font-bold text-gray-900 mb-3">6. Your Rights</h2>
                             <p className="text-gray-600 leading-relaxed">
-                                You have the right to access, correct, or delete your personal data. To exercise these rights, please contact us at <a href="mailto:privacy@demongo.org" className="text-blue-600 hover:underline">privacy@demongo.org</a>.
+                                You have the right to access, correct, or delete your personal data. To exercise these rights, please contact us at <a href="mailto:privacy@demongo.org" className="text-rose-600 hover:underline">privacy@demongo.org</a>.
                             </p>
                         </div>
 
                         <div>
                             <h2 className="text-xl font-bold text-gray-900 mb-3">7. Contact Us</h2>
                             <p className="text-gray-600 leading-relaxed">
-                                If you have questions about this Privacy Policy, please contact us at <a href="mailto:privacy@demongo.org" className="text-blue-600 hover:underline">privacy@demongo.org</a>.
+                                If you have questions about this Privacy Policy, please contact us at <a href="mailto:privacy@demongo.org" className="text-rose-600 hover:underline">privacy@demongo.org</a>.
                             </p>
                         </div>
 
