@@ -173,6 +173,7 @@ export default function AdminPage() {
     const [stats, setStats] = useState({ totalRaised: 0, totalDonations: 0, totalDonors: 0 });
     const [authError, setAuthError] = useState(false);
     const [activeTab, setActiveTab] = useState('donations');
+    const [selectedDonation, setSelectedDonation] = useState(null);
 
     const isAuthenticated = !!adminToken && !authError;
 
@@ -233,8 +234,95 @@ export default function AdminPage() {
         return <AdminLogin onLogin={handleLogin} />;
     }
 
+    // Modal Component
+    const renderModal = () => {
+        if (!selectedDonation) return null;
+        const d = selectedDonation;
+        const cfg = STATUS_CONFIG[d.status] || STATUS_CONFIG.pending;
+
+        return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm sm:p-0">
+                <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                    <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                        <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                            <Database className="h-5 w-5 text-rose-500" />
+                            Donation Details
+                        </h3>
+                        <button onClick={() => setSelectedDonation(null)} className="text-gray-400 hover:text-gray-600 transition rounded-full p-1 hover:bg-gray-200">
+                            <XCircle className="h-6 w-6" />
+                        </button>
+                    </div>
+                    <div className="px-6 py-6 space-y-6 max-h-[75vh] overflow-y-auto">
+
+                        {/* Status & Amount Hero */}
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-xl bg-gray-50 border border-gray-100">
+                            <div>
+                                <p className="text-sm font-medium text-gray-500 mb-1">Total Amount</p>
+                                <p className="text-3xl font-extrabold text-gray-900">₹{parseFloat(d.amount).toLocaleString('en-IN')}</p>
+                            </div>
+                            <div className="flex flex-col items-end gap-2">
+                                <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-semibold ${cfg.color}`}>
+                                    {cfg.icon} {cfg.label}
+                                </span>
+                                <span className="text-xs text-gray-500 font-medium">
+                                    {new Date(d.created_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Detail Grid */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                            <div>
+                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Donor Information</h4>
+                                <div className="space-y-3">
+                                    <div>
+                                        <p className="text-xs text-gray-500 font-medium">Name</p>
+                                        <p className="text-sm font-semibold text-gray-900">{d.donor_name}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-gray-500 font-medium">Email</p>
+                                        <p className="text-sm font-semibold text-gray-900">{d.email}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-gray-500 font-medium">Phone</p>
+                                        <p className="text-sm font-semibold text-gray-900">{d.phone || '—'}</p>
+                                    </div>
+                                    {d.pan_number && (
+                                        <div>
+                                            <p className="text-xs text-gray-500 font-medium">PAN Number</p>
+                                            <p className="text-sm font-semibold text-gray-900 uppercase">{d.pan_number}</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div>
+                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Payment Identifiers</h4>
+                                <div className="space-y-3">
+                                    <div>
+                                        <p className="text-xs text-gray-500 font-medium">Razorpay Order ID</p>
+                                        <p className="text-xs font-mono bg-gray-100 text-gray-800 p-1.5 rounded truncate">{d.razorpay_order_id || '—'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-gray-500 font-medium">Razorpay Payment ID</p>
+                                        <p className="text-xs font-mono bg-gray-100 text-gray-800 p-1.5 rounded truncate">{d.razorpay_payment_id || '—'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-gray-500 font-medium">Database Record ID</p>
+                                        <p className="text-xs font-mono text-gray-500">{d.id}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="min-h-screen bg-gray-50">
+            {renderModal()}
             {/* Header */}
             <section className="py-12 bg-gradient-to-br from-gray-900 to-gray-800 text-white">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -344,15 +432,20 @@ export default function AdminPage() {
                                                 <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Email</th>
                                                 <th className="px-6 py-4 text-right font-semibold text-gray-500 uppercase tracking-wider text-xs">Amount</th>
                                                 <th className="px-6 py-4 text-center font-semibold text-gray-500 uppercase tracking-wider text-xs">Status</th>
-                                                <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Date</th>
+                                                <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Date & Time</th>
                                                 <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Payment ID</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-gray-50">
                                             {donations.map(d => {
                                                 const cfg = STATUS_CONFIG[d.status] || STATUS_CONFIG.pending;
+                                                const dateObj = new Date(d.created_at);
                                                 return (
-                                                    <tr key={d.id} className="hover:bg-rose-50/30 transition">
+                                                    <tr
+                                                        key={d.id}
+                                                        onClick={() => setSelectedDonation(d)}
+                                                        className="hover:bg-rose-50/50 cursor-pointer transition"
+                                                    >
                                                         <td className="px-6 py-4 font-medium text-gray-900">{d.donor_name}</td>
                                                         <td className="px-6 py-4 text-gray-500">{d.email}</td>
                                                         <td className="px-6 py-4 text-right font-semibold text-gray-900">₹{parseFloat(d.amount).toLocaleString('en-IN')}</td>
@@ -362,7 +455,8 @@ export default function AdminPage() {
                                                             </span>
                                                         </td>
                                                         <td className="px-6 py-4 text-gray-500">
-                                                            {new Date(d.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                                            <div className="text-sm text-gray-900">{dateObj.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</div>
+                                                            <div className="text-xs text-gray-400 mt-0.5">{dateObj.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</div>
                                                         </td>
                                                         <td className="px-6 py-4 text-gray-400 font-mono text-xs">
                                                             {d.razorpay_payment_id || '—'}
