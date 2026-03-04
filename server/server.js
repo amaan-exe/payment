@@ -862,13 +862,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 const PORT = process.env.PORT || 5000;
-
-// Vercel serverless functions will require the app rather than running it directly
-if (require.main === module) {
-  app.listen(PORT, () => {
-    logger.info(`Server started on port ${PORT} (${isProduction ? 'production' : 'development'})`);
-  });
-}
-
-// Export the app for Vercel or testing
-module.exports = app;
+app.listen(PORT, () => {
+  logger.info(`Server started on port ${PORT} (${isProduction ? 'production' : 'development'})`);
+});
