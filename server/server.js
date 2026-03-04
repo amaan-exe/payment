@@ -1,4 +1,24 @@
 require('dotenv').config();
+
+// ========================
+// Required Environment Variables Check
+// ========================
+const REQUIRED_ENV_VARS = [
+  'DATABASE_URL',
+  'RAZORPAY_KEY_ID',
+  'RAZORPAY_KEY_SECRET',
+  'RAZORPAY_WEBHOOK_SECRET',
+  'JWT_SECRET',
+  'ADMIN_PASSWORD',
+];
+
+const missing = REQUIRED_ENV_VARS.filter(key => !process.env[key]);
+if (missing.length > 0) {
+  console.error(`\n❌ FATAL: Missing required environment variables:\n   ${missing.join('\n   ')}\n`);
+  console.error('Server cannot start without these. Please check your .env file.\n');
+  process.exit(1);
+}
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -53,7 +73,7 @@ function escapeHtml(str) {
 }
 
 // Admin password — hashed synchronously so it's available immediately
-const adminPasswordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'changeme', 10);
+const adminPasswordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
 logger.info('Admin password hash ready');
 
 // ========================
@@ -164,7 +184,7 @@ function adminAuth(req, res, next) {
   }
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_jwt_secret');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     if (decoded.role !== 'admin') throw new Error('Insufficient role');
     next();
   } catch (err) {
@@ -729,7 +749,7 @@ app.get('/api/order/:id/status', async (req, res, next) => {
     const donation = await withRetry(
       () => prisma.donation.findFirst({
         where: { razorpay_order_id: id },
-        select: { status: true, razorpay_payment_id: true, donor_name: true, email: true, amount: true, currency: true }
+        select: { status: true, razorpay_payment_id: true, amount: true, currency: true }
       }),
       { label: 'order-status.findFirst' }
     );
@@ -740,8 +760,6 @@ app.get('/api/order/:id/status', async (req, res, next) => {
 
     res.json({
       status: donation.status,
-      donor_name: donation.donor_name,
-      email: donation.email,
       amount: donation.amount,
       paymentId: donation.razorpay_payment_id,
       currency: donation.currency
@@ -762,7 +780,7 @@ app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
     if (isValid) {
       const token = jwt.sign(
         { role: 'admin' },
-        process.env.JWT_SECRET || 'fallback_jwt_secret',
+        process.env.JWT_SECRET,
         { expiresIn: '8h' }
       );
       res.json({ success: true, token });
@@ -812,6 +830,21 @@ cron.schedule('*/15 * * * *', async () => {
         const failedPayment = payments.items.find(p => p.status === 'failed');
 
         if (capturedPayment) {
+          // Fraud check: verify captured amount matches DB record
+          const expectedAmountPaise = Math.round(Number(donation.amount) * 100);
+          if (capturedPayment.amount !== expectedAmountPaise || capturedPayment.currency !== donation.currency) {
+            logger.error(`CRON FRAUD ALERT: Amount mismatch for order ${donation.razorpay_order_id}. Expected: ${expectedAmountPaise} ${donation.currency}, Got: ${capturedPayment.amount} ${capturedPayment.currency}`);
+            existingLogs.push({ event: 'cron_amount_mismatch_fraud', timestamp: new Date().toISOString() });
+            await withRetry(
+              () => prisma.donation.update({
+                where: { id: donation.id },
+                data: { status: 'failed', event_log: JSON.stringify(existingLogs) }
+              }),
+              { label: 'cron.update(fraud)' }
+            );
+            continue;
+          }
+
           await withRetry(
             () => prisma.donation.update({
               where: { id: donation.id },

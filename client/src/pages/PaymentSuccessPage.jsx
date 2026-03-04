@@ -200,7 +200,7 @@ export default function PaymentSuccessPage() {
                     {/* Gradient Header */}
                     <div className="bg-gradient-to-r from-emerald-500 to-green-600 px-8 py-6 text-white text-center">
                         <p className="text-emerald-100 text-sm font-medium mb-1">Amount Donated</p>
-                        <p className="text-4xl font-extrabold">₹{parseFloat(displayData.amount).toLocaleString('en-IN')}</p>
+                        <p className="text-4xl font-extrabold">₹{!isNaN(parseFloat(displayData.amount)) ? parseFloat(displayData.amount).toLocaleString('en-IN') : '—'}</p>
                     </div>
 
                     {/* Details */}

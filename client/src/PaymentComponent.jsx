@@ -11,7 +11,6 @@ const PRESET_AMOUNTS = [
     { value: 5000, label: 'Monthly ration' }
 ];
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 const PaymentComponent = () => {
     const toast = useToast();
     const navigate = useNavigate();
@@ -44,6 +43,7 @@ const PaymentComponent = () => {
         if (!formData.email.trim()) newErrors.email = 'Email is required';
         else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) newErrors.email = 'Invalid email address';
         if (!formData.amount || Number(formData.amount) < 1) newErrors.amount = 'Minimum ₹1 required';
+        else if (Number(formData.amount) > 1000000) newErrors.amount = 'Maximum ₹10,00,000 allowed';
         setErrors(newErrors);
         return Object.keys(newErrors).length === 0;
     };
@@ -106,12 +106,12 @@ const PaymentComponent = () => {
                 theme: {
                     color: '#e11d48'
                 },
-                callback_url: `${API_BASE_URL}/api/verify-payment-redirect`,
+                callback_url: `${axios.defaults.baseURL}/api/verify-payment-redirect`,
                 redirect: true,
                 modal: {
                     ondismiss: async function () {
                         try {
-                            await axios.post(`${API_BASE_URL}/api/cancel-payment`, {
+                            await axios.post(`/api/cancel-payment`, {
                                 razorpay_order_id: orderDetails.orderId
                             });
                         } catch (err) {
