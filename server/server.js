@@ -35,6 +35,10 @@ const logger = winston.createLogger({
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Trust Render's reverse proxy so express-rate-limit reads the real client IP
+// from X-Forwarded-For instead of throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+app.set('trust proxy', 1);
+
 // ========================
 // XSS Helper
 // ========================
@@ -197,9 +201,7 @@ if (process.env.SMTP_EMAIL && process.env.SMTP_PASSWORD) {
       pass: process.env.SMTP_PASSWORD.replace(/\s/g, ''),
     },
   });
-  transporter.verify()
-    .then(() => logger.info('Email transporter verified and ready'))
-    .catch(err => logger.error('Email transporter verification failed:', err.message));
+  logger.info('Email transporter configured (family:4 / IPv4)');
 }
 
 // FIX #15: Track email failures and log them
