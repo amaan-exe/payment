@@ -191,6 +191,7 @@ if (process.env.SMTP_EMAIL && process.env.SMTP_PASSWORD) {
     host: 'smtp.gmail.com',
     port: 465,
     secure: true,
+    family: 4, // Force IPv4 — server host does not support IPv6 (ENETUNREACH on 2404:6800:...)
     auth: {
       user: process.env.SMTP_EMAIL,
       pass: process.env.SMTP_PASSWORD.replace(/\s/g, ''),
