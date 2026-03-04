@@ -701,6 +701,36 @@ app.get('/api/stats', async (req, res, next) => {
   }
 });
 
+// Admin — Live Server Logs (JWT protected)
+app.get('/api/admin/logs', adminAuth, async (req, res, next) => {
+  try {
+    const fs = require('fs');
+    const readline = require('readline');
+    const path = require('path');
+
+    const maxLines = Number(req.query.lines) || 100;
+    const logPath = path.join(__dirname, 'combined.log');
+
+    if (!fs.existsSync(logPath)) {
+      return res.json({ logs: [] });
+    }
+
+    const fileStream = fs.createReadStream(logPath);
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+    const allLines = [];
+    for await (const line of rl) {
+      if (line.trim()) allLines.push(line);
+    }
+
+    // Return only the last N lines, reversed so newest is first
+    const recentLogs = allLines.slice(-maxLines).reverse();
+    res.json({ logs: recentLogs });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Admin — List donations (JWT protected)
 app.get('/api/donations', adminAuth, async (req, res, next) => {
   try {

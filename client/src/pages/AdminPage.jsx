@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import axios from 'axios';
-import { Database, Filter, RefreshCcw, CheckCircle, Clock, XCircle, IndianRupee, Lock, Eye, EyeOff, LogOut } from 'lucide-react';
+import { Database, Filter, RefreshCcw, CheckCircle, Clock, XCircle, IndianRupee, Lock, Eye, EyeOff, LogOut, Terminal, Play, Square } from 'lucide-react';
 
 const STATUS_CONFIG = {
     success: { label: 'Success', color: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="h-4 w-4" /> },
@@ -90,6 +90,78 @@ function AdminLogin({ onLogin }) {
     );
 }
 
+function LogViewer({ adminToken }) {
+    const [logs, setLogs] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [autoRefresh, setAutoRefresh] = useState(true);
+    const logsEndRef = useRef(null);
+
+    const fetchLogs = async () => {
+        try {
+            const res = await axios.get('/api/admin/logs?lines=200', {
+                headers: { 'Authorization': `Bearer ${adminToken}` }
+            });
+            setLogs(res.data.logs);
+            setLoading(false);
+        } catch (err) {
+            console.error('Failed to fetch logs', err);
+        }
+    };
+
+    useEffect(() => {
+        fetchLogs();
+        let interval;
+        if (autoRefresh) {
+            interval = setInterval(fetchLogs, 3000);
+        }
+        return () => clearInterval(interval);
+    }, [autoRefresh, adminToken]);
+
+    const getLogColor = (line) => {
+        if (line.includes('[ERROR]')) return 'text-red-400';
+        if (line.includes('[WARN]')) return 'text-amber-400';
+        if (line.includes('[DB FAIL]')) return 'text-rose-500 font-bold';
+        if (line.includes('[DB RETRY]')) return 'text-orange-400';
+        if (line.includes('FRAUD ALERT')) return 'text-red-500 font-bold bg-red-950/30 px-1';
+        return 'text-emerald-300';
+    };
+
+    return (
+        <div className="bg-gray-950 rounded-2xl shadow-xl overflow-hidden border border-gray-800 flex flex-col h-[70vh]">
+            <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-gray-400">
+                    <Terminal className="h-4 w-4" />
+                    <span className="text-sm font-medium font-mono">server.log</span>
+                </div>
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => setAutoRefresh(!autoRefresh)}
+                        className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded transition ${autoRefresh ? 'bg-emerald-950/50 text-emerald-400 hover:bg-emerald-900/50' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                    >
+                        {autoRefresh ? <><Square className="h-3 w-3 fill-current" /> Stop Tail</> : <><Play className="h-3 w-3 fill-current" /> Auto-Scroll</>}
+                    </button>
+                    <button onClick={fetchLogs} className="text-gray-400 hover:text-white transition" title="Refresh Now">
+                        <RefreshCcw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                    </button>
+                </div>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 font-mono text-xs sm:text-sm leading-relaxed custom-scrollbar bg-[#0D1117]">
+                {logs.length === 0 && !loading ? (
+                    <div className="text-gray-500 italic">No logs available. Note: combined.log may be empty.</div>
+                ) : (
+                    logs.map((log, i) => (
+                        <div key={i} className={`whitespace-pre-wrap break-all py-0.5 ${getLogColor(log)} border-b border-gray-800/30 last:border-0`}>
+                            {log}
+                        </div>
+                    ))
+                )}
+                {loading && logs.length === 0 && <div className="text-gray-500 animate-pulse">Connecting to log stream...</div>}
+                <div ref={logsEndRef} />
+            </div>
+        </div>
+    );
+}
+
 export default function AdminPage() {
     // FIX #4: Read JWT token from sessionStorage instead of raw password
     const [adminToken, setAdminToken] = useState(sessionStorage.getItem('adminToken') || '');
@@ -100,6 +172,7 @@ export default function AdminPage() {
     const [filter, setFilter] = useState('all');
     const [stats, setStats] = useState({ totalRaised: 0, totalDonations: 0, totalDonors: 0 });
     const [authError, setAuthError] = useState(false);
+    const [activeTab, setActiveTab] = useState('donations');
 
     const isAuthenticated = !!adminToken && !authError;
 
@@ -197,117 +270,145 @@ export default function AdminPage() {
                         </div>
                     </div>
                 </div>
+
+                {/* Navigation Tabs */}
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
+                    <div className="flex space-x-2 border-b border-gray-700/50 pb-px">
+                        <button
+                            onClick={() => setActiveTab('donations')}
+                            className={`px-4 py-2.5 text-sm font-semibold transition-colors border-b-2 ${activeTab === 'donations' ? 'border-rose-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
+                        >
+                            <div className="flex items-center gap-2"><Database className="h-4 w-4" /> Donations History</div>
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('logs')}
+                            className={`px-4 py-2.5 text-sm font-semibold transition-colors border-b-2 ${activeTab === 'logs' ? 'border-rose-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
+                        >
+                            <div className="flex items-center gap-2"><Terminal className="h-4 w-4" /> Live Server Logs</div>
+                        </button>
+                    </div>
+                </div>
             </section>
 
-            {/* Toolbar */}
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div className="flex items-center gap-2">
-                        <Filter className="h-4 w-4 text-gray-400" />
-                        <span className="text-sm text-gray-500 font-medium">Filter:</span>
-                        {['all', 'success', 'pending', 'failed'].map(s => (
+            {/* Active Tab Content */}
+            {activeTab === 'donations' ? (
+                <>
+                    {/* Toolbar */}
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+                        <div className="flex flex-wrap items-center justify-between gap-4">
+                            <div className="flex items-center gap-2">
+                                <Filter className="h-4 w-4 text-gray-400" />
+                                <span className="text-sm text-gray-500 font-medium">Filter:</span>
+                                {['all', 'success', 'pending', 'failed'].map(s => (
+                                    <button
+                                        key={s}
+                                        onClick={() => setFilter(s)}
+                                        className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${filter === s
+                                            ? 'bg-rose-600 text-white shadow-sm'
+                                            : 'bg-white text-gray-600 border border-gray-200 hover:border-rose-300'
+                                            }`}
+                                    >
+                                        {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+                                    </button>
+                                ))}
+                            </div>
                             <button
-                                key={s}
-                                onClick={() => setFilter(s)}
-                                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${filter === s
-                                    ? 'bg-rose-600 text-white shadow-sm'
-                                    : 'bg-white text-gray-600 border border-gray-200 hover:border-rose-300'
-                                    }`}
+                                onClick={fetchData}
+                                className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:border-rose-300 hover:text-rose-600 transition"
                             >
-                                {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+                                <RefreshCcw className="h-4 w-4" /> Refresh
                             </button>
-                        ))}
+                        </div>
                     </div>
-                    <button
-                        onClick={fetchData}
-                        className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:border-rose-300 hover:text-rose-600 transition"
-                    >
-                        <RefreshCcw className="h-4 w-4" /> Refresh
-                    </button>
-                </div>
-            </div>
 
-            {/* Table */}
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                    {loading ? (
-                        <div className="p-16 text-center">
-                            <div className="w-8 h-8 border-4 border-rose-200 border-t-rose-600 rounded-full animate-spin mx-auto mb-4"></div>
-                            <p className="text-gray-400">Loading donations…</p>
-                        </div>
-                    ) : donations.length === 0 ? (
-                        <div className="p-16 text-center">
-                            <Database className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-                            <p className="text-gray-400 font-medium">No donations found</p>
-                            <p className="text-gray-300 text-sm mt-1">Donations will appear here once they are made.</p>
-                        </div>
-                    ) : (
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                                <thead>
-                                    <tr className="border-b border-gray-100 bg-gray-50/50">
-                                        <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Donor</th>
-                                        <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Email</th>
-                                        <th className="px-6 py-4 text-right font-semibold text-gray-500 uppercase tracking-wider text-xs">Amount</th>
-                                        <th className="px-6 py-4 text-center font-semibold text-gray-500 uppercase tracking-wider text-xs">Status</th>
-                                        <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Date</th>
-                                        <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Payment ID</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-gray-50">
-                                    {donations.map(d => {
-                                        const cfg = STATUS_CONFIG[d.status] || STATUS_CONFIG.pending;
-                                        return (
-                                            <tr key={d.id} className="hover:bg-rose-50/30 transition">
-                                                <td className="px-6 py-4 font-medium text-gray-900">{d.donor_name}</td>
-                                                <td className="px-6 py-4 text-gray-500">{d.email}</td>
-                                                <td className="px-6 py-4 text-right font-semibold text-gray-900">₹{parseFloat(d.amount).toLocaleString('en-IN')}</td>
-                                                <td className="px-6 py-4 text-center">
-                                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.color}`}>
-                                                        {cfg.icon} {cfg.label}
-                                                    </span>
-                                                </td>
-                                                <td className="px-6 py-4 text-gray-500">
-                                                    {new Date(d.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                                                </td>
-                                                <td className="px-6 py-4 text-gray-400 font-mono text-xs">
-                                                    {d.razorpay_payment_id || '—'}
-                                                </td>
+                    {/* Table */}
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                            {loading ? (
+                                <div className="p-16 text-center">
+                                    <div className="w-8 h-8 border-4 border-rose-200 border-t-rose-600 rounded-full animate-spin mx-auto mb-4"></div>
+                                    <p className="text-gray-400">Loading donations…</p>
+                                </div>
+                            ) : donations.length === 0 ? (
+                                <div className="p-16 text-center">
+                                    <Database className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+                                    <p className="text-gray-400 font-medium">No donations found</p>
+                                    <p className="text-gray-300 text-sm mt-1">Donations will appear here once they are made.</p>
+                                </div>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead>
+                                            <tr className="border-b border-gray-100 bg-gray-50/50">
+                                                <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Donor</th>
+                                                <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Email</th>
+                                                <th className="px-6 py-4 text-right font-semibold text-gray-500 uppercase tracking-wider text-xs">Amount</th>
+                                                <th className="px-6 py-4 text-center font-semibold text-gray-500 uppercase tracking-wider text-xs">Status</th>
+                                                <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Date</th>
+                                                <th className="px-6 py-4 text-left font-semibold text-gray-500 uppercase tracking-wider text-xs">Payment ID</th>
                                             </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-50">
+                                            {donations.map(d => {
+                                                const cfg = STATUS_CONFIG[d.status] || STATUS_CONFIG.pending;
+                                                return (
+                                                    <tr key={d.id} className="hover:bg-rose-50/30 transition">
+                                                        <td className="px-6 py-4 font-medium text-gray-900">{d.donor_name}</td>
+                                                        <td className="px-6 py-4 text-gray-500">{d.email}</td>
+                                                        <td className="px-6 py-4 text-right font-semibold text-gray-900">₹{parseFloat(d.amount).toLocaleString('en-IN')}</td>
+                                                        <td className="px-6 py-4 text-center">
+                                                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.color}`}>
+                                                                {cfg.icon} {cfg.label}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-6 py-4 text-gray-500">
+                                                            {new Date(d.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-gray-400 font-mono text-xs">
+                                                            {d.razorpay_payment_id || '—'}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
                         </div>
-                    )}
-                </div>
 
-                {/* Pagination Controls */}
-                {!loading && donations.length > 0 && (
-                    <div className="flex items-center justify-between mt-6 bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-                        <p className="text-sm text-gray-500 font-medium">
-                            Showing <span className="font-bold text-gray-900">{donations.length}</span> of <span className="font-bold text-gray-900">{pagination.total}</span> donations
-                        </p>
-                        <div className="flex gap-2">
-                            <button
-                                onClick={() => setPage(p => Math.max(1, p - 1))}
-                                disabled={page === 1}
-                                className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition"
-                            >
-                                Previous
-                            </button>
-                            <span className="px-4 py-2 text-sm font-semibold text-gray-600">Page {page} of {pagination.totalPages}</span>
-                            <button
-                                onClick={() => setPage(p => Math.min(pagination.totalPages, p + 1))}
-                                disabled={page === pagination.totalPages}
-                                className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition"
-                            >
-                                Next
-                            </button>
-                        </div>
+                        {/* Pagination Controls */}
+                        {!loading && donations.length > 0 && (
+                            <div className="flex items-center justify-between mt-6 bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                                <p className="text-sm text-gray-500 font-medium">
+                                    Showing <span className="font-bold text-gray-900">{donations.length}</span> of <span className="font-bold text-gray-900">{pagination.total}</span> donations
+                                </p>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                                        disabled={page === 1}
+                                        className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition"
+                                    >
+                                        Previous
+                                    </button>
+                                    <span className="px-4 py-2 text-sm font-semibold text-gray-600">Page {page} of {pagination.totalPages}</span>
+                                    <button
+                                        onClick={() => setPage(p => Math.min(pagination.totalPages, p + 1))}
+                                        disabled={page === pagination.totalPages}
+                                        className="px-4 py-2 text-sm font-semibold rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition"
+                                    >
+                                        Next
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                     </div>
-                )}
-            </div>
+                </>
+            ) : (
+                /* LIVE LOGS TAB */
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-16">
+                    <LogViewer adminToken={adminToken} />
+                </div>
+            )}
         </div>
     );
 }
