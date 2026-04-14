@@ -449,8 +449,11 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
         return res.status(404).json({ error: 'Order not found in database' });
       }
 
-      if (donation.status !== 'pending') {
+      if (donation.status === 'success') {
         return res.status(200).json({ success: true, message: 'Payment already processed' });
+      }
+      if (donation.status === 'failed') {
+        return res.status(400).json({ success: false, message: 'Payment already marked as failed' });
       }
 
       // Fraud Protection: Fetch actual payment from Razorpay to verify amounts
@@ -475,7 +478,7 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       const currentLogs = Array.isArray(donation.event_log) ? donation.event_log : [];
       const successUpdate = await withRetry(
         () => prisma.donation.updateMany({
-          where: { id: donation.id, status: 'pending' },
+          where: { id: donation.id, status: { in: ['pending', 'authorized'] } },
           data: {
             razorpay_payment_id,
             status: 'success',
@@ -687,7 +690,7 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       const currentLogs2 = Array.isArray(donation.event_log) ? donation.event_log : [];
       const successUpdate = await withRetry(
         () => prisma.donation.updateMany({
-          where: { id: donation.id, status: 'pending' },
+          where: { id: donation.id, status: { in: ['pending', 'authorized'] } },
           data: {
             razorpay_payment_id,
             status: 'success',
