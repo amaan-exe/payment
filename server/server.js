@@ -344,6 +344,7 @@ if ((emailProvider === 'smtp' || emailProvider === 'auto') && !smtpFromLooksVali
 
 const RECEIPT_EMAIL_MAX_ATTEMPTS = 3;
 const RECEIPT_EMAIL_BASE_DELAY_MS = 1200;
+const RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS = Number(process.env.RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS || 20000);
 const receiptEmailStateByPaymentId = new Map();
 
 function delay(ms) {
@@ -390,7 +391,16 @@ function triggerReceiptEmail(donorName, email, amount, paymentId, source) {
 
 async function sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source) {
   for (let attempt = 1; attempt <= RECEIPT_EMAIL_MAX_ATTEMPTS; attempt++) {
-    const wasSent = await sendReceiptEmail(donorName, email, amount, paymentId, source, attempt);
+    const wasSent = await Promise.race([
+      sendReceiptEmail(donorName, email, amount, paymentId, source, attempt),
+      delay(RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS).then(() => {
+        throw new Error(`Receipt email attempt timed out after ${RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS}ms`);
+      })
+    ]).catch((err) => {
+      logger.error(`Receipt email attempt timeout/failure for payment ${paymentId} source=${source} attempt=${attempt}: ${err.message}`);
+      return false;
+    });
+
     if (wasSent) {
       return true;
     }
@@ -683,6 +693,25 @@ DEMO NGO - Feeding the hungry, one meal at a time.
 
       const smtpService = (process.env.SMTP_SERVICE || 'gmail').trim().toLowerCase();
       if (!isIpv6Unreachable || smtpService !== 'gmail') {
+        if (canUseResend) {
+          logger.warn(`SMTP send failed for payment ${paymentId}; attempting Resend fallback. Error: ${smtpErr.message}`);
+          const fallbackResend = await resendClient.emails.send({
+            from: resendFromAddress,
+            to: email,
+            subject: 'Thank you for your donation! — DEMO NGO',
+            text: emailText,
+            html: emailHtml
+          });
+
+          if (fallbackResend?.error) {
+            throw new Error(`SMTP failed (${smtpErr.message}) and Resend fallback failed (${JSON.stringify(fallbackResend.error)})`);
+          }
+
+          const fallbackMessageId = fallbackResend?.data?.id || fallbackResend?.id || 'unknown';
+          logger.info(`Receipt email accepted by Resend fallback (id=${fallbackMessageId}) after SMTP failure for payment ${paymentId}.`);
+          return true;
+        }
+
         throw smtpErr;
       }
 
