@@ -312,18 +312,16 @@ function resolveResendFromAddress() {
   return resendFromAddress;
 }
 
-if (!resendFromAddress) {
-  logger.warn('RESEND_FROM_EMAIL is not set. Configure a verified sender (example: "DEMO NGO <donations@yourdomain.com>").');
-} else if (!resendSenderLooksValid) {
-  logger.warn('RESEND_FROM_EMAIL format appears invalid. Expected "Name <email@domain.com>" or "email@domain.com".');
-}
-
 let smtpTransporter = null;
 const smtpFromAddress = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || '').trim();
 const smtpFromLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(smtpFromAddress);
 const SMTP_CONNECTION_TIMEOUT_MS = Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15000);
 const SMTP_GREETING_TIMEOUT_MS = Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10000);
 const SMTP_SOCKET_TIMEOUT_MS = Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 20000);
+const brevoApiKey = (process.env.BREVO_API_KEY || '').trim();
+const brevoFromEmail = (process.env.BREVO_FROM_EMAIL || process.env.SMTP_FROM_EMAIL || '').trim();
+const brevoFromName = (process.env.BREVO_FROM_NAME || 'DEMO NGO').trim();
+const brevoSenderLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(brevoFromEmail);
 
 if (process.env.SMTP_USER && process.env.SMTP_PASS) {
   const service = (process.env.SMTP_SERVICE || 'gmail').trim();
@@ -357,12 +355,38 @@ if (process.env.SMTP_USER && process.env.SMTP_PASS) {
   logger.info(`Email client configured (SMTP ${hasCustomHost ? 'custom host' : service})`);
 }
 
-if ((emailProvider === 'smtp' || emailProvider === 'auto') && !smtpTransporter) {
+if (emailProvider === 'smtp' && !smtpTransporter) {
   logger.warn('SMTP email provider requested but SMTP_USER/SMTP_PASS are not configured.');
 }
 
-if ((emailProvider === 'smtp' || emailProvider === 'auto') && !smtpFromLooksValid) {
+if (emailProvider === 'smtp' && !smtpFromLooksValid) {
   logger.warn('SMTP_FROM_EMAIL is missing or invalid. Falling back to SMTP_USER as sender if valid.');
+}
+
+if (brevoApiKey) {
+  logger.info('Email client configured (Brevo API)');
+}
+
+if (emailProvider === 'brevo' && !brevoApiKey) {
+  logger.warn('BREVO provider selected but BREVO_API_KEY is not configured.');
+}
+
+if (emailProvider === 'brevo' && brevoApiKey && !brevoSenderLooksValid) {
+  logger.warn('BREVO_FROM_EMAIL is missing or invalid. Brevo API sending will fail until a valid sender email is configured.');
+}
+
+if (emailProvider === 'resend' && !resendClient) {
+  logger.warn('RESEND provider selected but RESEND_API_KEY is not configured.');
+}
+
+if (emailProvider === 'resend' && !resendFromAddress) {
+  logger.warn('RESEND_FROM_EMAIL is not set. Configure a verified sender (example: "DEMO NGO <donations@yourdomain.com>").');
+} else if (emailProvider === 'resend' && !resendSenderLooksValid) {
+  logger.warn('RESEND_FROM_EMAIL format appears invalid. Expected "Name <email@domain.com>" or "email@domain.com".');
+}
+
+if (emailProvider === 'auto' && !brevoApiKey && !smtpTransporter && !resendClient) {
+  logger.warn('EMAIL_PROVIDER=auto but no provider is configured. Set Brevo, SMTP, or Resend credentials.');
 }
 
 const RECEIPT_EMAIL_MAX_ATTEMPTS = 3;
@@ -370,19 +394,6 @@ const RECEIPT_EMAIL_BASE_DELAY_MS = 1200;
 const RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS = Number(process.env.RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS || 20000);
 const BREVO_API_TIMEOUT_MS = Number(process.env.BREVO_API_TIMEOUT_MS || 20000);
 const receiptEmailStateByPaymentId = new Map();
-
-const brevoApiKey = (process.env.BREVO_API_KEY || '').trim();
-const brevoFromEmail = (process.env.BREVO_FROM_EMAIL || process.env.SMTP_FROM_EMAIL || '').trim();
-const brevoFromName = (process.env.BREVO_FROM_NAME || 'DEMO NGO').trim();
-const brevoSenderLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(brevoFromEmail);
-
-if (brevoApiKey) {
-  logger.info('Email client configured (Brevo API)');
-}
-
-if ((emailProvider === 'brevo' || emailProvider === 'auto') && brevoApiKey && !brevoSenderLooksValid) {
-  logger.warn('BREVO_FROM_EMAIL is missing or invalid. Brevo API sending will fail until a valid sender email is configured.');
-}
 
 async function sendViaBrevo(toEmail, subject, textContent, htmlContent) {
   if (!brevoApiKey || !brevoSenderLooksValid) {
