@@ -368,7 +368,61 @@ if ((emailProvider === 'smtp' || emailProvider === 'auto') && !smtpFromLooksVali
 const RECEIPT_EMAIL_MAX_ATTEMPTS = 3;
 const RECEIPT_EMAIL_BASE_DELAY_MS = 1200;
 const RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS = Number(process.env.RECEIPT_EMAIL_ATTEMPT_TIMEOUT_MS || 20000);
+const BREVO_API_TIMEOUT_MS = Number(process.env.BREVO_API_TIMEOUT_MS || 20000);
 const receiptEmailStateByPaymentId = new Map();
+
+const brevoApiKey = (process.env.BREVO_API_KEY || '').trim();
+const brevoFromEmail = (process.env.BREVO_FROM_EMAIL || process.env.SMTP_FROM_EMAIL || '').trim();
+const brevoFromName = (process.env.BREVO_FROM_NAME || 'DEMO NGO').trim();
+const brevoSenderLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(brevoFromEmail);
+
+if (brevoApiKey) {
+  logger.info('Email client configured (Brevo API)');
+}
+
+if ((emailProvider === 'brevo' || emailProvider === 'auto') && brevoApiKey && !brevoSenderLooksValid) {
+  logger.warn('BREVO_FROM_EMAIL is missing or invalid. Brevo API sending will fail until a valid sender email is configured.');
+}
+
+async function sendViaBrevo(toEmail, subject, textContent, htmlContent) {
+  if (!brevoApiKey || !brevoSenderLooksValid) {
+    throw new Error('Brevo configuration missing: set BREVO_API_KEY and valid BREVO_FROM_EMAIL');
+  }
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), BREVO_API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': brevoApiKey,
+        'accept': 'application/json'
+      },
+      body: JSON.stringify({
+        sender: {
+          name: brevoFromName,
+          email: brevoFromEmail
+        },
+        to: [{ email: toEmail }],
+        subject,
+        textContent,
+        htmlContent
+      }),
+      signal: controller.signal
+    });
+
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`Brevo API error ${response.status}: ${JSON.stringify(body)}`);
+    }
+
+    return body;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -499,21 +553,31 @@ async function sendReceiptEmailWithRetry(donorName, email, amount, paymentId, so
 // FIX #15: Track email failures and log them
 async function sendReceiptEmail(donorName, email, amount, paymentId, source, attempt) {
   const resendFromResolved = resolveResendFromAddress();
+  const canUseBrevo = Boolean(brevoApiKey && brevoSenderLooksValid);
   const canUseResend = Boolean(resendClient && resendFromResolved);
   const canUseSmtp = smtpTransporter && smtpFromLooksValid;
 
-  if (!canUseResend && !canUseSmtp) {
-    logger.error('Email receipt skipped: no valid email provider configured. Set EMAIL_PROVIDER=smtp with SMTP_USER/SMTP_PASS for free Gmail sending.');
+  if (!canUseBrevo && !canUseResend && !canUseSmtp) {
+    logger.error('Email receipt skipped: no valid email provider configured. Set EMAIL_PROVIDER=brevo with BREVO_API_KEY/BREVO_FROM_EMAIL, or configure SMTP/Resend.');
     return false;
   }
 
-  const providerToUse = emailProvider === 'smtp'
-    ? 'smtp'
-    : emailProvider === 'resend'
-      ? 'resend'
-      : canUseSmtp
-        ? 'smtp'
-        : 'resend';
+  const providerToUse = emailProvider === 'brevo'
+    ? 'brevo'
+    : emailProvider === 'smtp'
+      ? 'smtp'
+      : emailProvider === 'resend'
+        ? 'resend'
+        : canUseBrevo
+          ? 'brevo'
+          : canUseSmtp
+            ? 'smtp'
+            : 'resend';
+
+  if (providerToUse === 'brevo' && !canUseBrevo) {
+    logger.error('Email receipt skipped: Brevo selected but BREVO_API_KEY / BREVO_FROM_EMAIL configuration is incomplete.');
+    return false;
+  }
 
   if (providerToUse === 'resend' && !canUseResend) {
     logger.error('Email receipt skipped: Resend selected but RESEND_API_KEY / RESEND_FROM_EMAIL configuration is incomplete.');
@@ -740,11 +804,20 @@ DEMO NGO - Feeding the hungry, one meal at a time.
 </html>
     `;
 
+    const emailSubject = 'Thank you for your donation! — DEMO NGO';
+
+    if (providerToUse === 'brevo') {
+      const brevoResult = await sendViaBrevo(email, emailSubject, emailText, emailHtml);
+      const messageId = brevoResult?.messageId || brevoResult?.messageIds?.[0] || 'unknown';
+      logger.info(`Receipt email accepted by Brevo (id=${messageId}) to ${safeEmail} from ${brevoFromEmail} source=${source} attempt=${attempt}`);
+      return true;
+    }
+
     if (providerToUse === 'resend') {
       const emailResult = await resendClient.emails.send({
         from: resendFromResolved,
         to: email,
-        subject: 'Thank you for your donation! — DEMO NGO',
+        subject: emailSubject,
         text: emailText,
         html: emailHtml
       });
@@ -761,7 +834,7 @@ DEMO NGO - Feeding the hungry, one meal at a time.
     const smtpMail = {
       from: smtpFromAddress,
       to: email,
-      subject: 'Thank you for your donation! — DEMO NGO',
+      subject: emailSubject,
       text: emailText,
       html: emailHtml
     };
@@ -803,12 +876,20 @@ DEMO NGO - Feeding the hungry, one meal at a time.
         smtpInfo = await fallbackTransporter.sendMail(smtpMail);
         logger.info(`SMTP IPv4 fallback succeeded for payment ${paymentId} using ${ipv4Addresses[0]}.`);
       } else {
+        if (canUseBrevo) {
+          logger.warn(`SMTP send failed for payment ${paymentId}; attempting Brevo fallback. Error: ${smtpErr.message}`);
+          const fallbackBrevo = await sendViaBrevo(email, emailSubject, emailText, emailHtml);
+          const fallbackBrevoId = fallbackBrevo?.messageId || fallbackBrevo?.messageIds?.[0] || 'unknown';
+          logger.info(`Receipt email accepted by Brevo fallback (id=${fallbackBrevoId}) after SMTP failure for payment ${paymentId}.`);
+          return true;
+        }
+
         if (canUseResend) {
           logger.warn(`SMTP send failed for payment ${paymentId}; attempting Resend fallback. Error: ${smtpErr.message}`);
           const fallbackResend = await resendClient.emails.send({
             from: resendFromResolved,
             to: email,
-            subject: 'Thank you for your donation! — DEMO NGO',
+            subject: emailSubject,
             text: emailText,
             html: emailHtml
           });
