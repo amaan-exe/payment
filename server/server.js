@@ -1055,9 +1055,13 @@ cron.schedule('*/15 * * * *', async () => {
 // Keep-Alive Cron Job (Ping Cron Job API)
 // ========================
 if (process.env.CRON_JOB_API_KEY) {
+  if (!process.env.CRONITOR_MONITOR_KEY && !process.env.CRON_JOB_MONITOR_KEY) {
+    logger.warn('CRONITOR_MONITOR_KEY is not set; using legacy Cronitor ping endpoint fallback');
+  }
   // Ping health endpoint every 5 minutes via Cron Job API
   cron.schedule('*/5 * * * *', async () => {
     const serverUrl = process.env.FRONTEND_URL?.split(',')[0]?.trim() || `http://localhost:${process.env.PORT || 5000}`;
+    const monitorKey = process.env.CRONITOR_MONITOR_KEY || process.env.CRON_JOB_MONITOR_KEY;
     logger.info('Keep-alive cron job running...');
     
     try {
@@ -1066,16 +1070,24 @@ if (process.env.CRON_JOB_API_KEY) {
         output: `Health check ping from ${serverUrl}`
       });
 
-      const options = {
-        hostname: 'cronitor.io',
-        port: 443,
-        path: `/api/v1/pings/${process.env.CRON_JOB_API_KEY}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(pingData)
-        }
-      };
+      const options = monitorKey
+        ? {
+            hostname: 'cronitor.link',
+            port: 443,
+            path: `/p/${encodeURIComponent(process.env.CRON_JOB_API_KEY)}/${encodeURIComponent(monitorKey)}?state=run` ,
+            method: 'GET'
+          }
+        : {
+            // Backward-compatible fallback for older single-key setup.
+            hostname: 'cronitor.io',
+            port: 443,
+            path: `/api/v1/pings/${encodeURIComponent(process.env.CRON_JOB_API_KEY)}`,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(pingData)
+            }
+          };
 
       const req = https.request(options, (res) => {
         if (res.statusCode === 200 || res.statusCode === 204) {
@@ -1113,7 +1125,9 @@ if (process.env.CRON_JOB_API_KEY) {
         logger.warn(`Keep-alive ping error: ${err.message}`);
       });
 
-      req.write(pingData);
+      if (options.method === 'POST') {
+        req.write(pingData);
+      }
       req.end();
     } catch (err) {
       addAdminActivity({
