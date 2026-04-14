@@ -469,19 +469,23 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       }
 
       const currentLogs = Array.isArray(donation.event_log) ? donation.event_log : [];
-      await withRetry(
-        () => prisma.donation.update({
-          where: { id: donation.id },
+      const successUpdate = await withRetry(
+        () => prisma.donation.updateMany({
+          where: { id: donation.id, status: 'pending' },
           data: {
             razorpay_payment_id,
             status: 'success',
             event_log: JSON.stringify([...currentLogs, { event: 'frontend_payment.verified', timestamp: new Date().toISOString() }])
           }
         }),
-        { label: 'verify-payment.update(success)' }
+        { label: 'verify-payment.updateMany(success)' }
       );
 
-      sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+      if (successUpdate.count > 0) {
+        sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+      } else {
+        logger.info(`Receipt skipped in verify-payment: Order ${razorpay_order_id} already transitioned.`);
+      }
       logger.info(`Payment verified securely: ${razorpay_payment_id} for order ${razorpay_order_id}`);
       return res.status(200).json({ success: true, message: 'Payment successfully verified' });
 
@@ -558,19 +562,24 @@ app.post('/api/webhook/razorpay', async (req, res, next) => {
         }
 
         if (event === 'payment.captured') {
-          await withRetry(
-            () => prisma.donation.update({
-              where: { id: donation.id },
+          const successUpdate = await withRetry(
+            () => prisma.donation.updateMany({
+              where: { id: donation.id, status: { in: ['pending', 'authorized'] } },
               data: {
                 razorpay_payment_id,
                 status: 'success',
                 event_log: JSON.stringify(existingLogs)
               }
             }),
-            { label: 'webhook.update(success)' }
+            { label: 'webhook.updateMany(success)' }
           );
-          sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
-          logger.info(`Webhook synced recovery: Payment captured ${razorpay_payment_id} for order ${razorpay_order_id}`);
+
+          if (successUpdate.count > 0) {
+            sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+            logger.info(`Webhook synced recovery: Payment captured ${razorpay_payment_id} for order ${razorpay_order_id}`);
+          } else {
+            logger.info(`Webhook captured ignored: Order ${razorpay_order_id} already transitioned to success.`);
+          }
         } else if (event === 'payment.authorized') {
           await withRetry(
             () => prisma.donation.update({
@@ -672,19 +681,23 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       }
 
       const currentLogs2 = Array.isArray(donation.event_log) ? donation.event_log : [];
-      await withRetry(
-        () => prisma.donation.update({
-          where: { id: donation.id },
+      const successUpdate = await withRetry(
+        () => prisma.donation.updateMany({
+          where: { id: donation.id, status: 'pending' },
           data: {
             razorpay_payment_id,
             status: 'success',
             event_log: JSON.stringify([...currentLogs2, { event: 'redirect_payment.verified', timestamp: new Date().toISOString() }])
           }
         }),
-        { label: 'redirect.update(success)' }
+        { label: 'redirect.updateMany(success)' }
       );
 
-      sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+      if (successUpdate.count > 0) {
+        sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+      } else {
+        logger.info(`Receipt skipped in redirect verify: Order ${razorpay_order_id} already transitioned.`);
+      }
       logger.info(`Redirect payment verified: ${razorpay_payment_id} for order ${razorpay_order_id}`);
       return res.redirect(303, `${dynamicFrontendUrl}/payment-success?payment_id=${razorpay_payment_id}&order_id=${razorpay_order_id}`);
 
