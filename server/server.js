@@ -351,7 +351,63 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function enqueueReceiptEmail(donorName, email, amount, paymentId, source) {
+function parseEventLog(logValue) {
+  if (Array.isArray(logValue)) return logValue;
+  if (typeof logValue === 'string') {
+    try {
+      const parsed = JSON.parse(logValue);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+async function markReceiptEmailStatus(donationId, paymentId, source, status, details) {
+  if (!donationId) return;
+
+  try {
+    const donation = await withRetry(
+      () => prisma.donation.findUnique({ where: { id: donationId }, select: { event_log: true } }),
+      { label: `receipt-status.findUnique(${status})` }
+    );
+
+    if (!donation) return;
+
+    const events = parseEventLog(donation.event_log);
+    const alreadyRecorded = events.some(e =>
+      e &&
+      e.event === `receipt_email_${status}` &&
+      e.paymentId === paymentId
+    );
+
+    if (alreadyRecorded) return;
+
+    const updatedEvents = [
+      ...events,
+      {
+        event: `receipt_email_${status}`,
+        paymentId,
+        source,
+        details: details || '',
+        timestamp: new Date().toISOString()
+      }
+    ];
+
+    await withRetry(
+      () => prisma.donation.update({
+        where: { id: donationId },
+        data: { event_log: JSON.stringify(updatedEvents) }
+      }),
+      { label: `receipt-status.update(${status})` }
+    );
+  } catch (err) {
+    logger.warn(`Unable to persist receipt_email_${status} marker for donation ${donationId}: ${err.message}`);
+  }
+}
+
+async function enqueueReceiptEmail(donorName, email, amount, paymentId, source, donationId) {
   if (!paymentId) {
     logger.warn('Receipt email skipped: missing paymentId');
     return false;
@@ -371,19 +427,22 @@ async function enqueueReceiptEmail(donorName, email, amount, paymentId, source) 
     receiptEmailStateByPaymentId.set(paymentId, wasSent ? 'sent' : 'failed');
     if (wasSent) {
       logger.info(`Receipt email completed for payment ${paymentId} source=${source}`);
+      await markReceiptEmailStatus(donationId, paymentId, source, 'sent');
     } else {
       logger.warn(`Receipt email failed after retries for payment ${paymentId} source=${source}`);
+      await markReceiptEmailStatus(donationId, paymentId, source, 'failed', 'Failed after retries');
     }
     return wasSent;
   } catch (err) {
     receiptEmailStateByPaymentId.set(paymentId, 'failed');
     logger.error(`Unexpected email queue failure for payment ${paymentId}: ${err.message}`);
+    await markReceiptEmailStatus(donationId, paymentId, source, 'failed', err.message);
     return false;
   }
 }
 
-function triggerReceiptEmail(donorName, email, amount, paymentId, source) {
-  enqueueReceiptEmail(donorName, email, amount, paymentId, source)
+function triggerReceiptEmail(donorName, email, amount, paymentId, source, donationId) {
+  enqueueReceiptEmail(donorName, email, amount, paymentId, source, donationId)
     .catch((err) => {
       logger.error(`Unexpected async receipt trigger failure for payment ${paymentId} source=${source}: ${err.message}`);
     });
@@ -915,7 +974,7 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       );
 
       if (successUpdate.count > 0) {
-        triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment');
+        triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment', donation.id);
       } else {
         logger.info(`Receipt skipped in verify-payment: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -1008,7 +1067,7 @@ app.post('/api/webhook/razorpay', async (req, res, next) => {
           );
 
           if (successUpdate.count > 0) {
-            triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured');
+            triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured', donation.id);
             logger.info(`Webhook synced recovery: Payment captured ${razorpay_payment_id} for order ${razorpay_order_id}`);
           } else {
             logger.info(`Webhook captured ignored: Order ${razorpay_order_id} already transitioned to success.`);
@@ -1095,7 +1154,8 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
           donation.email,
           donation.amount,
           donation.razorpay_payment_id || razorpay_payment_id,
-          'verify-payment-redirect-already-success'
+          'verify-payment-redirect-already-success',
+          donation.id
         );
         return res.redirect(303, `${dynamicFrontendUrl}/payment-success?payment_id=${razorpay_payment_id}&order_id=${razorpay_order_id}`);
       }
@@ -1134,7 +1194,7 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       );
 
       if (successUpdate.count > 0) {
-        triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect');
+        triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect', donation.id);
       } else {
         logger.info(`Receipt skipped in redirect verify: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -1437,13 +1497,12 @@ cron.schedule('*/15 * * * *', async () => {
       { label: 'cron.findMany(stale)' }
     );
 
-    if (staleDonations.length === 0) return;
+    if (staleDonations.length > 0) {
+      for (const donation of staleDonations) {
+        if (!donation.razorpay_order_id) continue;
 
-    for (const donation of staleDonations) {
-      if (!donation.razorpay_order_id) continue;
-
-      try {
-        const payments = await razorpay.orders.fetchPayments(donation.razorpay_order_id);
+        try {
+          const payments = await razorpay.orders.fetchPayments(donation.razorpay_order_id);
 
         const existingLogs = Array.isArray(donation.event_log) ? donation.event_log : [];
         existingLogs.push({ event: 'cron_reconciliation_check', timestamp: new Date().toISOString() });
@@ -1479,7 +1538,7 @@ cron.schedule('*/15 * * * *', async () => {
             { label: 'cron.update(success)' }
           );
           logger.info(`Cron Reconciled (Success): Order ${donation.razorpay_order_id}`);
-          await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, capturedPayment.id, 'cron-reconciliation');
+          await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, capturedPayment.id, 'cron-reconciliation', donation.id);
         } else if (failedPayment) {
           await withRetry(
             () => prisma.donation.update({
@@ -1493,11 +1552,49 @@ cron.schedule('*/15 * * * *', async () => {
           );
           logger.info(`Cron Reconciled (Failed): Order ${donation.razorpay_order_id}`);
         }
-      } catch (err) {
-        logger.error(`Cron failed for order ${donation.razorpay_order_id}: ${err.message}`);
-      }
+        } catch (err) {
+          logger.error(`Cron failed for order ${donation.razorpay_order_id}: ${err.message}`);
+        }
 
-      await new Promise(res => setTimeout(res, 300));
+        await new Promise(res => setTimeout(res, 300));
+      }
+    }
+
+    // Backfill receipt emails for successful donations that missed real-time send.
+    const successfulDonations = await withRetry(
+      () => prisma.donation.findMany({
+        where: {
+          status: 'success',
+          created_at: { gt: threeDaysAgo },
+          razorpay_payment_id: { not: null }
+        },
+        take: 100,
+        orderBy: { created_at: 'desc' }
+      }),
+      { label: 'cron.findMany(successful-for-receipt-backfill)' }
+    );
+
+    for (const donation of successfulDonations) {
+      const paymentId = donation.razorpay_payment_id;
+      if (!paymentId) continue;
+
+      const events = parseEventLog(donation.event_log);
+      const alreadySent = events.some(e =>
+        e &&
+        e.event === 'receipt_email_sent' &&
+        e.paymentId === paymentId
+      );
+
+      if (!alreadySent) {
+        triggerReceiptEmail(
+          donation.donor_name,
+          donation.email,
+          donation.amount,
+          paymentId,
+          'cron-receipt-backfill',
+          donation.id
+        );
+      }
     }
   } catch (err) {
     logger.error(`Reconciliation Cron Job Error: ${err.message}`);
