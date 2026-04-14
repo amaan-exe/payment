@@ -37,6 +37,8 @@ const https = require('https');
 
 const MAX_ADMIN_ACTIVITY_LOGS = 500;
 const MAX_ANALYTICS_EVENTS = 2000;
+// Admin activity is intentionally NOT persisted in database.
+// Storage policy: in-memory ring buffer + server log file entries only.
 const adminActivityLogs = [];
 const analyticsEvents = [];
 const analyticsPathCounters = new Map();
@@ -74,6 +76,7 @@ function getRequestIp(req) {
 }
 
 function addAdminActivity({ actor, action, result, source, ip, details }) {
+  // Keep login/activity entries out of Prisma/DB by design.
   const entry = {
     id: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
@@ -137,6 +140,7 @@ function escapeHtml(str) {
 // Admin password — hashed synchronously so it's available immediately
 const adminPasswordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
 logger.info('Admin password hash ready');
+logger.info('Admin activity logs storage: memory/file only (database persistence disabled)');
 
 // ========================
 // Security Middleware
