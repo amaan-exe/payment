@@ -33,6 +33,13 @@ const cron = require('node-cron');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const https = require('https');
+
+const MAX_ADMIN_ACTIVITY_LOGS = 500;
+const MAX_ANALYTICS_EVENTS = 2000;
+const adminActivityLogs = [];
+const analyticsEvents = [];
+const analyticsPathCounters = new Map();
 
 // ========================
 // Logger Setup (Winston)
@@ -57,6 +64,58 @@ const logger = winston.createLogger({
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
+
+function getRequestIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function addAdminActivity({ actor, action, result, source, ip, details }) {
+  const entry = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    actor: actor || 'admin',
+    action: action || 'login',
+    result: result || 'success',
+    source: source || 'admin_portal',
+    ip: ip || 'unknown',
+    details: details || ''
+  };
+
+  adminActivityLogs.unshift(entry);
+  if (adminActivityLogs.length > MAX_ADMIN_ACTIVITY_LOGS) {
+    adminActivityLogs.splice(MAX_ADMIN_ACTIVITY_LOGS);
+  }
+
+  const detailPart = entry.details ? ` details="${entry.details}"` : '';
+  logger.info(`[ADMIN_ACTIVITY] actor=${entry.actor} action=${entry.action} result=${entry.result} source=${entry.source} ip=${entry.ip}${detailPart}`);
+  return entry;
+}
+
+function trackPageView(pathname, ip, referrer, userAgent) {
+  const safePath = typeof pathname === 'string' && pathname.startsWith('/') ? pathname.slice(0, 200) : '/unknown';
+  const event = {
+    timestamp: new Date().toISOString(),
+    path: safePath,
+    ip: ip || 'unknown',
+    referrer: typeof referrer === 'string' ? referrer.slice(0, 300) : '',
+    userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 300) : ''
+  };
+
+  analyticsEvents.unshift(event);
+  if (analyticsEvents.length > MAX_ANALYTICS_EVENTS) {
+    analyticsEvents.splice(MAX_ANALYTICS_EVENTS);
+  }
+
+  const prev = analyticsPathCounters.get(safePath) || { views: 0, lastViewedAt: null };
+  analyticsPathCounters.set(safePath, {
+    views: prev.views + 1,
+    lastViewedAt: event.timestamp
+  });
+}
 
 // Trust Render's reverse proxy so express-rate-limit reads the real client IP
 // from X-Forwarded-For instead of throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
@@ -189,6 +248,7 @@ function adminAuth(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     if (decoded.role !== 'admin') throw new Error('Insufficient role');
+    req.admin = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Unauthorized — invalid or expired token' });
@@ -285,6 +345,16 @@ app.get('/', (req, res) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// Website analytics ingestion (public)
+app.post('/api/analytics/page-view', (req, res) => {
+  const clientIp = getRequestIp(req);
+  const userAgent = req.get('user-agent') || '';
+  const { path: pagePath, referrer } = req.body || {};
+
+  trackPageView(pagePath, clientIp, referrer, userAgent);
+  res.json({ success: true });
 });
 
 // Create Order
@@ -704,6 +774,36 @@ app.get('/api/stats', async (req, res, next) => {
   }
 });
 
+// Admin analytics summary (JWT protected)
+app.get('/api/admin/analytics', adminAuth, async (req, res) => {
+  const now = Date.now();
+  const oneDayAgo = now - (24 * 60 * 60 * 1000);
+  const last24hEvents = analyticsEvents.filter(e => new Date(e.timestamp).getTime() >= oneDayAgo);
+  const uniqueVisitors24h = new Set(last24hEvents.map(e => e.ip)).size;
+
+  const topPages = Array.from(analyticsPathCounters.entries())
+    .sort((a, b) => b[1].views - a[1].views)
+    .slice(0, 5)
+    .map(([pathName, meta]) => ({
+      path: pathName,
+      views: meta.views,
+      lastViewedAt: meta.lastViewedAt
+    }));
+
+  res.json({
+    totalViewsAllTime: analyticsEvents.length,
+    totalViews24h: last24hEvents.length,
+    uniqueVisitors24h,
+    topPages
+  });
+});
+
+// Admin activity logs (JWT protected)
+app.get('/api/admin/activity-logs', adminAuth, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  res.json({ logs: adminActivityLogs.slice(0, limit) });
+});
+
 // Admin — Live Server Logs (JWT protected)
 app.get('/api/admin/logs', adminAuth, async (req, res, next) => {
   try {
@@ -804,13 +904,33 @@ app.get('/api/order/:id/status', async (req, res, next) => {
 
 // FIX #4 + #9: Admin login — issues JWT token, bcrypt password check, rate limited
 app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
-  const { password } = req.body;
+  const { password, actor } = req.body || {};
+  const loginActor = actor === 'cronjob' ? 'cronjob' : 'admin';
+  const loginIp = getRequestIp(req);
+
   if (!password) {
+    addAdminActivity({
+      actor: loginActor,
+      action: 'login',
+      result: 'failed',
+      source: 'admin_portal',
+      ip: loginIp,
+      details: 'Password missing'
+    });
     return res.status(400).json({ error: 'Password required' });
   }
   try {
     const isValid = await bcrypt.compare(password, adminPasswordHash);
     if (isValid) {
+      addAdminActivity({
+        actor: loginActor,
+        action: 'login',
+        result: 'success',
+        source: 'admin_portal',
+        ip: loginIp,
+        details: 'Admin token issued'
+      });
+
       const token = jwt.sign(
         { role: 'admin' },
         process.env.JWT_SECRET,
@@ -818,9 +938,25 @@ app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
       );
       res.json({ success: true, token });
     } else {
+      addAdminActivity({
+        actor: loginActor,
+        action: 'login',
+        result: 'failed',
+        source: 'admin_portal',
+        ip: loginIp,
+        details: 'Invalid password'
+      });
       res.status(401).json({ error: 'Invalid password' });
     }
   } catch (err) {
+    addAdminActivity({
+      actor: loginActor,
+      action: 'login',
+      result: 'failed',
+      source: 'admin_portal',
+      ip: loginIp,
+      details: `Login error: ${err.message}`
+    });
     res.status(500).json({ error: 'Login error' });
   }
 });
@@ -914,6 +1050,86 @@ cron.schedule('*/15 * * * *', async () => {
     logger.error(`Reconciliation Cron Job Error: ${err.message}`);
   }
 });
+
+// ========================
+// Keep-Alive Cron Job (Ping Cron Job API)
+// ========================
+if (process.env.CRON_JOB_API_KEY) {
+  // Ping health endpoint every 5 minutes via Cron Job API
+  cron.schedule('*/5 * * * *', async () => {
+    const serverUrl = process.env.FRONTEND_URL?.split(',')[0]?.trim() || `http://localhost:${process.env.PORT || 5000}`;
+    logger.info('Keep-alive cron job running...');
+    
+    try {
+      const pingData = JSON.stringify({
+        status: 'run',
+        output: `Health check ping from ${serverUrl}`
+      });
+
+      const options = {
+        hostname: 'cronitor.io',
+        port: 443,
+        path: `/api/v1/pings/${process.env.CRON_JOB_API_KEY}`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(pingData)
+        }
+      };
+
+      const req = https.request(options, (res) => {
+        if (res.statusCode === 200 || res.statusCode === 204) {
+          addAdminActivity({
+            actor: 'cronjob',
+            action: 'login',
+            result: 'success',
+            source: 'keepalive_cron',
+            ip: 'server',
+            details: `Cronitor ping success (HTTP ${res.statusCode})`
+          });
+          logger.info(`Keep-alive ping sent to Cron Job API successfully (HTTP ${res.statusCode})`);
+        } else {
+          addAdminActivity({
+            actor: 'cronjob',
+            action: 'login',
+            result: 'failed',
+            source: 'keepalive_cron',
+            ip: 'server',
+            details: `Cronitor ping returned HTTP ${res.statusCode}`
+          });
+          logger.warn(`Keep-alive ping response: HTTP ${res.statusCode}`);
+        }
+      });
+
+      req.on('error', (err) => {
+        addAdminActivity({
+          actor: 'cronjob',
+          action: 'login',
+          result: 'failed',
+          source: 'keepalive_cron',
+          ip: 'server',
+          details: `Cronitor ping error: ${err.message}`
+        });
+        logger.warn(`Keep-alive ping error: ${err.message}`);
+      });
+
+      req.write(pingData);
+      req.end();
+    } catch (err) {
+      addAdminActivity({
+        actor: 'cronjob',
+        action: 'login',
+        result: 'failed',
+        source: 'keepalive_cron',
+        ip: 'server',
+        details: `Keep-alive cron failed: ${err.message}`
+      });
+      logger.error(`Keep-alive ping failed: ${err.message}`);
+    }
+  });
+
+  logger.info('Keep-alive cron job initialized (pings Cron Job API every 5 minutes)');
+}
 
 // ========================
 // Graceful Shutdown

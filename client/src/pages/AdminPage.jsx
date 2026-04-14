@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import axios from 'axios';
-import { Database, Filter, RefreshCcw, CheckCircle, Clock, XCircle, IndianRupee, Lock, Eye, EyeOff, LogOut, Terminal, Play, Square } from 'lucide-react';
+import { Database, Filter, RefreshCcw, CheckCircle, Clock, XCircle, IndianRupee, Lock, Eye, EyeOff, LogOut, Terminal, Play, Square, Activity, BarChart3 } from 'lucide-react';
 
 const STATUS_CONFIG = {
     success: { label: 'Success', color: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="h-4 w-4" /> },
@@ -162,6 +162,134 @@ function LogViewer({ adminToken }) {
     );
 }
 
+function AdminActivityViewer({ adminToken }) {
+    const [activityLogs, setActivityLogs] = useState([]);
+    const [loading, setLoading] = useState(true);
+
+    const fetchActivityLogs = async () => {
+        try {
+            const res = await axios.get('/api/admin/activity-logs?limit=150', {
+                headers: { 'Authorization': `Bearer ${adminToken}` }
+            });
+            setActivityLogs(res.data.logs || []);
+        } catch (err) {
+            try {
+                // Fallback: parse structured admin activity lines from the live server logs endpoint.
+                const fallback = await axios.get('/api/admin/logs?lines=300', {
+                    headers: { 'Authorization': `Bearer ${adminToken}` }
+                });
+
+                const parsed = (fallback.data.logs || [])
+                    .filter((line) => line.includes('[ADMIN_ACTIVITY]'))
+                    .map((line, idx) => {
+                        const timestamp = line.slice(0, 19).replace(' ', 'T');
+                        const actorMatch = line.match(/actor=([^\s]+)/);
+                        const actionMatch = line.match(/action=([^\s]+)/);
+                        const resultMatch = line.match(/result=([^\s]+)/);
+                        const sourceMatch = line.match(/source=([^\s]+)/);
+                        const ipMatch = line.match(/ip=([^\s]+)/);
+                        const detailMatch = line.match(/details="([^"]+)"/);
+
+                        return {
+                            id: `${timestamp}-${idx}`,
+                            timestamp: new Date(timestamp).toISOString(),
+                            actor: actorMatch?.[1] || 'unknown',
+                            action: actionMatch?.[1] || 'login',
+                            result: resultMatch?.[1] || 'unknown',
+                            source: sourceMatch?.[1] || 'server_log',
+                            ip: ipMatch?.[1] || 'unknown',
+                            details: detailMatch?.[1] || ''
+                        };
+                    });
+
+                setActivityLogs(parsed);
+            } catch (fallbackErr) {
+                console.error('Failed to fetch admin activity logs', fallbackErr);
+            }
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchActivityLogs();
+        const interval = setInterval(fetchActivityLogs, 5000);
+        return () => clearInterval(interval);
+    }, [adminToken]);
+
+    return (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/60">
+                <div className="flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-rose-500" />
+                    <h3 className="text-sm font-semibold text-gray-800">Admin Activity Logs</h3>
+                </div>
+                <button
+                    onClick={fetchActivityLogs}
+                    className="text-xs font-medium text-gray-500 hover:text-rose-600 transition"
+                >
+                    Refresh
+                </button>
+            </div>
+
+            <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                    <thead>
+                        <tr className="border-b border-gray-100 bg-white">
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">When</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Who</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Action</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Result</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Source</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">IP</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                        {!loading && activityLogs.length === 0 && (
+                            <tr>
+                                <td className="px-4 py-10 text-center text-gray-400" colSpan={7}>No admin activity recorded yet.</td>
+                            </tr>
+                        )}
+
+                        {activityLogs.map((log) => {
+                            const isCron = log.actor === 'cronjob';
+                            return (
+                                <tr key={log.id} className="hover:bg-gray-50/70 transition">
+                                    <td className="px-4 py-3 text-gray-500 whitespace-nowrap">
+                                        {new Date(log.timestamp).toLocaleString('en-IN', {
+                                            day: '2-digit',
+                                            month: 'short',
+                                            year: 'numeric',
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                            second: '2-digit'
+                                        })}
+                                    </td>
+                                    <td className="px-4 py-3 whitespace-nowrap">
+                                        <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold ${isCron ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+                                            {log.actor}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{log.action}</td>
+                                    <td className="px-4 py-3 whitespace-nowrap">
+                                        <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold ${log.result === 'success' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                                            {log.result}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{log.source}</td>
+                                    <td className="px-4 py-3 text-gray-500 font-mono text-xs whitespace-nowrap">{log.ip}</td>
+                                    <td className="px-4 py-3 text-gray-600 max-w-xs truncate" title={log.details || ''}>{log.details || '—'}</td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
 export default function AdminPage() {
     // FIX #4: Read JWT token from sessionStorage instead of raw password
     const [adminToken, setAdminToken] = useState(sessionStorage.getItem('adminToken') || '');
@@ -171,6 +299,7 @@ export default function AdminPage() {
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState('all');
     const [stats, setStats] = useState({ totalRaised: 0, totalDonations: 0, totalDonors: 0 });
+    const [analytics, setAnalytics] = useState({ totalViews24h: 0, uniqueVisitors24h: 0, topPages: [] });
     const [authError, setAuthError] = useState(false);
     const [activeTab, setActiveTab] = useState('donations');
     const [selectedDonation, setSelectedDonation] = useState(null);
@@ -190,9 +319,21 @@ export default function AdminPage() {
                 }),
                 axios.get('/api/stats'),
             ]);
+
+            let analyticsPayload = { totalViews24h: 0, uniqueVisitors24h: 0, topPages: [] };
+            try {
+                const analyticsRes = await axios.get('/api/admin/analytics', {
+                    headers: { 'Authorization': `Bearer ${adminToken}` }
+                });
+                analyticsPayload = analyticsRes.data;
+            } catch (analyticsErr) {
+                console.warn('Analytics endpoint unavailable, using fallback values.');
+            }
+
             setDonations(donationsRes.data.data);
             setPagination(donationsRes.data.pagination);
             setStats(statsRes.data);
+            setAnalytics(analyticsPayload);
             setAuthError(false);
         } catch (err) {
             if (err.response?.status === 401) {
@@ -357,6 +498,17 @@ export default function AdminPage() {
                             <p className="text-2xl font-bold">{stats.totalDonors}</p>
                         </div>
                     </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                        <div className="bg-white/10 backdrop-blur-sm rounded-xl p-5 border border-white/10">
+                            <p className="text-gray-400 text-sm font-medium mb-1">Website Views (24h)</p>
+                            <p className="text-2xl font-bold">{analytics.totalViews24h || 0}</p>
+                        </div>
+                        <div className="bg-white/10 backdrop-blur-sm rounded-xl p-5 border border-white/10">
+                            <p className="text-gray-400 text-sm font-medium mb-1">Unique Visitors (24h)</p>
+                            <p className="text-2xl font-bold">{analytics.uniqueVisitors24h || 0}</p>
+                        </div>
+                    </div>
                 </div>
 
                 {/* Navigation Tabs */}
@@ -367,6 +519,12 @@ export default function AdminPage() {
                             className={`px-4 py-2.5 text-sm font-semibold transition-colors border-b-2 ${activeTab === 'donations' ? 'border-rose-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
                         >
                             <div className="flex items-center gap-2"><Database className="h-4 w-4" /> Donations History</div>
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('activity')}
+                            className={`px-4 py-2.5 text-sm font-semibold transition-colors border-b-2 ${activeTab === 'activity' ? 'border-rose-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
+                        >
+                            <div className="flex items-center gap-2"><Activity className="h-4 w-4" /> Admin Activity</div>
                         </button>
                         <button
                             onClick={() => setActiveTab('logs')}
@@ -497,6 +655,29 @@ export default function AdminPage() {
                         )}
                     </div>
                 </>
+            ) : activeTab === 'activity' ? (
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-16 space-y-6">
+                    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                        <div className="flex items-center gap-2 mb-3">
+                            <BarChart3 className="h-4 w-4 text-rose-500" />
+                            <h3 className="text-sm font-semibold text-gray-800">Top Website Pages</h3>
+                        </div>
+                        {analytics.topPages?.length ? (
+                            <div className="space-y-3">
+                                {analytics.topPages.map((page) => (
+                                    <div key={page.path} className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-b-0 last:pb-0">
+                                        <span className="font-mono text-gray-600 truncate pr-4">{page.path}</span>
+                                        <span className="font-semibold text-gray-900 whitespace-nowrap">{page.views} views</span>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <p className="text-sm text-gray-400">No website analytics yet. Open pages on the site to start tracking.</p>
+                        )}
+                    </div>
+
+                    <AdminActivityViewer adminToken={adminToken} />
+                </div>
             ) : (
                 /* LIVE LOGS TAB */
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-16">

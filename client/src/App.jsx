@@ -2,6 +2,7 @@ import React from 'react';
 import { Routes, Route, Link, useLocation } from 'react-router-dom';
 import { HandHeart, ShieldCheck, Menu, X } from 'lucide-react';
 import { useState } from 'react';
+import axios from 'axios';
 
 import HomePage from './pages/HomePage';
 import AboutPage from './pages/AboutPage';
@@ -14,6 +15,17 @@ import NotFoundPage from './pages/NotFoundPage';
 function App() {
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  React.useEffect(() => {
+    const payload = {
+      path: `${location.pathname}${location.search}`,
+      referrer: document.referrer || ''
+    };
+
+    axios.post('/api/analytics/page-view', payload).catch(() => {
+      // Best-effort analytics tracking; UI flow should never fail on telemetry errors.
+    });
+  }, [location.pathname, location.search]);
 
   const navLinks = [
     { to: '/', label: 'Home' },
