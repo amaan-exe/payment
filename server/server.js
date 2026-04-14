@@ -35,6 +35,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const https = require('https');
+const dns = require('dns').promises;
 
 const MAX_ADMIN_ACTIVITY_LOGS = 500;
 const MAX_ANALYTICS_EVENTS = 2000;
@@ -648,13 +649,53 @@ DEMO NGO - Feeding the hungry, one meal at a time.
       return true;
     }
 
-    const smtpInfo = await smtpTransporter.sendMail({
+    const smtpMail = {
       from: smtpFromAddress,
       to: email,
       subject: 'Thank you for your donation! — DEMO NGO',
       text: emailText,
       html: emailHtml
-    });
+    };
+
+    let smtpInfo;
+    try {
+      smtpInfo = await smtpTransporter.sendMail(smtpMail);
+    } catch (smtpErr) {
+      const isIpv6Unreachable =
+        smtpErr?.code === 'ENETUNREACH' &&
+        (String(smtpErr?.message || '').includes('connect ENETUNREACH') || String(smtpErr?.message || '').includes(':::0'));
+
+      const smtpService = (process.env.SMTP_SERVICE || 'gmail').trim().toLowerCase();
+      if (!isIpv6Unreachable || smtpService !== 'gmail') {
+        throw smtpErr;
+      }
+
+      // Render environments may not have outbound IPv6 routing. Retry once via resolved IPv4.
+      logger.warn(`SMTP IPv6 route unavailable for payment ${paymentId}; retrying via IPv4 fallback.`);
+      const fallbackHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+      const ipv4Addresses = await dns.resolve4(fallbackHost);
+
+      if (!ipv4Addresses || ipv4Addresses.length === 0) {
+        throw new Error(`SMTP IPv4 fallback failed: no A records found for ${fallbackHost}`);
+      }
+
+      const fallbackTransporter = nodemailer.createTransport({
+        host: ipv4Addresses[0],
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: process.env.SMTP_SECURE === 'true',
+        requireTLS: process.env.SMTP_SECURE !== 'true',
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS
+        },
+        tls: {
+          servername: fallbackHost
+        }
+      });
+
+      smtpInfo = await fallbackTransporter.sendMail(smtpMail);
+      logger.info(`SMTP IPv4 fallback succeeded for payment ${paymentId} using ${ipv4Addresses[0]}.`);
+    }
 
     logger.info(`Receipt email accepted by SMTP (id=${smtpInfo.messageId || 'unknown'}) to ${safeEmail} from ${smtpFromAddress} source=${source} attempt=${attempt}`);
     return true;
