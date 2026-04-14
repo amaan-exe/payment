@@ -28,6 +28,7 @@ const { withRetry } = require('./db');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 const winston = require('winston');
 const cron = require('node-cron');
 const jwt = require('jsonwebtoken');
@@ -274,23 +275,138 @@ const razorpay = new Razorpay({
 });
 
 // ========================
-// Email (Resend HTTP API)
+// Email (Resend or SMTP)
 // ========================
+const emailProvider = (process.env.EMAIL_PROVIDER || 'auto').trim().toLowerCase();
+
 let resendClient = null;
 if (process.env.RESEND_API_KEY) {
   resendClient = new Resend(process.env.RESEND_API_KEY);
   logger.info('Email client configured (Resend API)');
 }
 
-if (!process.env.RESEND_FROM_EMAIL) {
-  logger.warn('RESEND_FROM_EMAIL is not set. Using onboarding@resend.dev may reduce deliverability outside testing.');
+const resendFromAddress = (process.env.RESEND_FROM_EMAIL || '').trim();
+const resendSenderLooksValid = /^.+<[^\s@]+@[^\s@]+\.[^\s@]+>$|^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resendFromAddress);
+
+if (!resendFromAddress) {
+  logger.warn('RESEND_FROM_EMAIL is not set. Configure a verified sender (example: "DEMO NGO <donations@yourdomain.com>").');
+} else if (!resendSenderLooksValid) {
+  logger.warn('RESEND_FROM_EMAIL format appears invalid. Expected "Name <email@domain.com>" or "email@domain.com".');
+}
+
+let smtpTransporter = null;
+const smtpFromAddress = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || '').trim();
+const smtpFromLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(smtpFromAddress);
+
+if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+  const service = (process.env.SMTP_SERVICE || 'gmail').trim();
+  const hasCustomHost = Boolean(process.env.SMTP_HOST);
+
+  smtpTransporter = nodemailer.createTransport(hasCustomHost
+    ? {
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    }
+    : {
+      service,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    }
+  );
+
+  logger.info(`Email client configured (SMTP ${hasCustomHost ? 'custom host' : service})`);
+}
+
+if ((emailProvider === 'smtp' || emailProvider === 'auto') && !smtpTransporter) {
+  logger.warn('SMTP email provider requested but SMTP_USER/SMTP_PASS are not configured.');
+}
+
+if ((emailProvider === 'smtp' || emailProvider === 'auto') && !smtpFromLooksValid) {
+  logger.warn('SMTP_FROM_EMAIL is missing or invalid. Falling back to SMTP_USER as sender if valid.');
+}
+
+const RECEIPT_EMAIL_MAX_ATTEMPTS = 3;
+const RECEIPT_EMAIL_BASE_DELAY_MS = 1200;
+const receiptEmailStateByPaymentId = new Map();
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function enqueueReceiptEmail(donorName, email, amount, paymentId, source) {
+  if (!paymentId) {
+    logger.warn('Receipt email skipped: missing paymentId');
+    return;
+  }
+
+  const existingState = receiptEmailStateByPaymentId.get(paymentId);
+  if (existingState === 'processing' || existingState === 'sent') {
+    logger.info(`Receipt email deduped for payment ${paymentId} (state=${existingState}, source=${source})`);
+    return;
+  }
+
+  receiptEmailStateByPaymentId.set(paymentId, 'processing');
+  setImmediate(() => {
+    sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source)
+      .then((wasSent) => {
+        receiptEmailStateByPaymentId.set(paymentId, wasSent ? 'sent' : 'failed');
+      })
+      .catch((err) => {
+        receiptEmailStateByPaymentId.set(paymentId, 'failed');
+        logger.error(`Unexpected email queue failure for payment ${paymentId}: ${err.message}`);
+      });
+  });
+}
+
+async function sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source) {
+  for (let attempt = 1; attempt <= RECEIPT_EMAIL_MAX_ATTEMPTS; attempt++) {
+    const wasSent = await sendReceiptEmail(donorName, email, amount, paymentId, source, attempt);
+    if (wasSent) {
+      return true;
+    }
+
+    if (attempt < RECEIPT_EMAIL_MAX_ATTEMPTS) {
+      const backoffMs = RECEIPT_EMAIL_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await delay(backoffMs);
+    }
+  }
+
+  return false;
 }
 
 // FIX #15: Track email failures and log them
-async function sendReceiptEmail(donorName, email, amount, paymentId) {
-  if (!resendClient) {
-    logger.warn('Email receipt skipped: RESEND_API_KEY not configured.');
-    return;
+async function sendReceiptEmail(donorName, email, amount, paymentId, source, attempt) {
+  const canUseResend = resendClient && resendFromAddress && resendSenderLooksValid;
+  const canUseSmtp = smtpTransporter && smtpFromLooksValid;
+
+  if (!canUseResend && !canUseSmtp) {
+    logger.error('Email receipt skipped: no valid email provider configured. Set EMAIL_PROVIDER=smtp with SMTP_USER/SMTP_PASS for free Gmail sending.');
+    return false;
+  }
+
+  const providerToUse = emailProvider === 'smtp'
+    ? 'smtp'
+    : emailProvider === 'resend'
+      ? 'resend'
+      : canUseSmtp
+        ? 'smtp'
+        : 'resend';
+
+  if (providerToUse === 'resend' && !canUseResend) {
+    logger.error('Email receipt skipped: Resend selected but RESEND_API_KEY / RESEND_FROM_EMAIL configuration is incomplete.');
+    return false;
+  }
+
+  if (providerToUse === 'smtp' && !canUseSmtp) {
+    logger.error('Email receipt skipped: SMTP selected but SMTP credentials/sender are invalid.');
+    return false;
   }
 
   try {
@@ -299,42 +415,247 @@ async function sendReceiptEmail(donorName, email, amount, paymentId) {
     const safeEmail = escapeHtml(email);
     const safeAmount = escapeHtml(String(amount));
     const safePaymentId = escapeHtml(paymentId);
-
-    const fromAddress = process.env.RESEND_FROM_EMAIL || 'DEMO NGO <onboarding@resend.dev>';
-
-    const emailResult = await resendClient.emails.send({
-      from: fromAddress,
-      to: email,
-      subject: 'Thank you for your donation! — DEMO NGO',
-      html: `
-        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f8fafc; border-radius: 12px; overflow: hidden;">
-          <div style="background: linear-gradient(135deg, #2563eb, #1d4ed8); padding: 32px; text-align: center;">
-            <h1 style="color: white; margin: 0; font-size: 24px;">💙 Thank You, ${safeName}!</h1>
-          </div>
-          <div style="padding: 32px;">
-            <p style="font-size: 16px; color: #374151;">Your generous donation of <strong>₹${safeAmount}</strong> has been received successfully.</p>
-            <table style="width: 100%; border-collapse: collapse; margin: 24px 0;">
-              <tr><td style="padding: 8px 0; color: #6b7280;">Payment ID</td><td style="padding: 8px 0; font-weight: 600;">${safePaymentId}</td></tr>
-              <tr><td style="padding: 8px 0; color: #6b7280;">Amount</td><td style="padding: 8px 0; font-weight: 600;">₹${safeAmount}</td></tr>
-              <tr><td style="padding: 8px 0; color: #6b7280;">Status</td><td style="padding: 8px 0; font-weight: 600; color: #059669;">✅ Successful</td></tr>
-            </table>
-            <p style="font-size: 14px; color: #6b7280;">This donation is eligible for 80G tax exemption. A formal receipt will be sent within 7 working days.</p>
-            <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
-            <p style="font-size: 12px; color: #9ca3af; text-align: center;">DEMO NGO — Feeding the hungry, one meal at a time.</p>
-          </div>
-        </div>
-      `
+    const donationDate = new Date().toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric'
     });
+    const safeDonationDate = escapeHtml(donationDate);
+    const safeReceiptNo = escapeHtml(`RCP-${String(paymentId || '00000000').slice(-8).toUpperCase()}`);
+    const safeSupportEmail = escapeHtml(process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || 'support@demo-ngo.org');
+    const safeSupportPhone = escapeHtml(process.env.SUPPORT_PHONE || '+91-8271301179');
+    const safeCause = escapeHtml(process.env.DEFAULT_DONATION_CAUSE || 'Education for underprivileged children');
+    const amountNumber = Number(amount) || 0;
+    const impactMeals = Math.max(1, Math.floor(amountNumber / 215));
+    const impactBooks = Math.max(1, Math.floor(amountNumber / 850));
+    const impactChildren = Math.max(1, Math.floor(amountNumber / 2500));
 
-    if (emailResult?.error) {
-      throw new Error(`Resend API rejected email: ${JSON.stringify(emailResult.error)}`);
+    const emailText = `
+Thank you, ${safeName}!
+
+Your donation has been received successfully.
+Amount: INR ${safeAmount}
+Payment ID: ${safePaymentId}
+Status: Successful
+
+This donation is eligible for 80G tax exemption. A formal receipt will be sent within 7 working days.
+
+DEMO NGO - Feeding the hungry, one meal at a time.
+    `.trim();
+
+    const emailHtml = `
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="format-detection" content="telephone=no,address=no,email=no,date=no,url=no">
+  <title>Payment Confirmed — Your Donation to DEMO NGO</title>
+  <style>
+    * { box-sizing: border-box; }
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; }
+    body { margin: 0 !important; padding: 0 !important; width: 100% !important; }
+
+    @keyframes floatUp { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-7px); } }
+    @keyframes heartbeat { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.2); } }
+    @keyframes shimmer { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes wiggle { 0%, 100% { transform: rotate(-5deg); } 50% { transform: rotate(5deg); } }
+
+    .float-anim { animation: floatUp 3s ease-in-out infinite; display: inline-block; }
+    .heartbeat-anim { animation: heartbeat 1.4s ease-in-out infinite; display: inline-block; }
+    .shimmer-anim { animation: shimmer 2s ease-in-out infinite; display: inline-block; }
+    .spin-anim { animation: spin 8s linear infinite; display: inline-block; }
+    .wiggle-anim { animation: wiggle 1.2s ease-in-out infinite; display: inline-block; }
+
+    @media only screen and (max-width: 600px) {
+      .email-container { width: 100% !important; }
+      .grid-cell { display: block !important; width: 100% !important; margin-bottom: 8px !important; }
+      .impact-cell { display: inline-block !important; width: 30% !important; text-align: center !important; }
+    }
+  </style>
+</head>
+
+<body style="margin:0;padding:0;background-color:#f7f2f9;font-family:Arial,Helvetica,sans-serif;">
+  <div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+    Yay! Your donation was confirmed! You just made someone's day brighter.
+  </div>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#f7f2f9;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table class="email-container" role="presentation" cellspacing="0" cellpadding="0" border="0" width="580" style="max-width:580px;width:100%;">
+          <tr>
+            <td align="center" style="background-color:#fbeaf0;border-radius:24px 24px 0 0;padding:36px 32px 28px;border:2px solid #ed93b1;border-bottom:none;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td style="text-align:left;vertical-align:top;width:40px;"><span class="shimmer-anim" style="font-size:18px;color:#1d9e75;line-height:1;">&#10022;</span></td>
+                  <td align="center">
+                    <span class="float-anim">
+                      <svg width="76" height="76" viewBox="0 0 76 76" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="38" cy="38" r="36" fill="#fbeaf0" stroke="#ed93b1" stroke-width="2.5"/>
+                        <circle cx="38" cy="38" r="28" fill="#f4c0d1"/>
+                        <circle cx="38" cy="38" r="16" fill="#d4537e"/>
+                        <text x="38" y="45" text-anchor="middle" font-size="20" fill="white" font-family="Arial,sans-serif">&#9825;</text>
+                      </svg>
+                    </span>
+                  </td>
+                  <td style="text-align:right;vertical-align:top;width:40px;">
+                    <span class="spin-anim"><svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg"><polygon points="11,1 13,7.5 20,7.5 14.5,12 16.5,19 11,15 5.5,19 7.5,12 2,7.5 9,7.5" fill="#ef9f27"/></svg></span>
+                  </td>
+                </tr>
+              </table>
+              <div style="height:14px;"></div>
+              <h1 style="margin:0 0 6px;font-size:24px;font-weight:700;color:#72243e;line-height:1.25;">Yay! Your donation went through!</h1>
+              <p style="margin:0;font-size:14px;color:#d4537e;line-height:1.5;">You just made someone's day a whole lot brighter &#10022;</p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background-color:#ffffff;border-left:2px solid #ed93b1;border-right:2px solid #ed93b1;padding:0 28px 24px;">
+              <div style="height:24px;"></div>
+              <p style="margin:0 0 4px;font-size:15px;color:#2c2c2a;line-height:1.6;">Dear <strong style="color:#3c3489;">${safeName}</strong>,</p>
+              <p style="margin:0 0 20px;font-size:13px;color:#5f5e5a;line-height:1.7;">We've successfully received your generous donation. Here's a summary of your transaction.</p>
+
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border:2px dashed #ed93b1;border-radius:16px;background-color:#ffffff;">
+                <tr>
+                  <td style="padding:20px 20px 16px;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                      <tr>
+                        <td class="grid-cell" width="49%" valign="top" style="padding-right:6px;padding-bottom:10px;">
+                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#fbeaf0;border-radius:12px;"><tr><td style="padding:10px 14px;"><div style="font-size:11px;color:#993556;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Amount</div><div style="font-size:20px;font-weight:700;color:#72243e;">&#8377;${safeAmount}</div></td></tr></table>
+                        </td>
+                        <td class="grid-cell" width="49%" valign="top" style="padding-left:6px;padding-bottom:10px;">
+                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#e1f5ee;border-radius:12px;"><tr><td style="padding:10px 14px;"><div style="font-size:11px;color:#0f6e56;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Date</div><div style="font-size:16px;font-weight:700;color:#085041;">${safeDonationDate}</div></td></tr></table>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td class="grid-cell" width="49%" valign="top" style="padding-right:6px;padding-bottom:10px;">
+                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#eeedfe;border-radius:12px;"><tr><td style="padding:10px 14px;"><div style="font-size:11px;color:#534ab7;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Receipt no.</div><div style="font-size:14px;font-weight:700;color:#3c3489;font-family:'Courier New',monospace;">#${safeReceiptNo}</div></td></tr></table>
+                        </td>
+                        <td class="grid-cell" width="49%" valign="top" style="padding-left:6px;padding-bottom:10px;">
+                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#faeeda;border-radius:12px;"><tr><td style="padding:10px 14px;"><div style="font-size:11px;color:#854f0b;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Method</div><div style="font-size:13px;font-weight:700;color:#633806;">Online payment</div></td></tr></table>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colspan="2" style="padding-bottom:10px;"><table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#eaf3de;border-radius:12px;"><tr><td style="padding:10px 14px;"><div style="font-size:11px;color:#3b6d11;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Cause / Fund</div><div style="font-size:13px;font-weight:700;color:#27500a;">${safeCause}</div></td></tr></table></td>
+                      </tr>
+                      <tr>
+                        <td colspan="2" style="padding-bottom:10px;"><table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#f1efe8;border-radius:12px;"><tr><td style="padding:10px 14px;"><div style="font-size:11px;color:#5f5e5a;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Transaction ID</div><div style="font-size:13px;font-weight:700;color:#2c2c2a;font-family:'Courier New',monospace;">${safePaymentId}</div></td></tr></table></td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background-color:#ffffff;border-left:2px solid #ed93b1;border-right:2px solid #ed93b1;padding:0 28px 20px;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#eeedfe;border:1.5px solid #afa9ec;border-radius:14px;">
+                <tr><td style="padding:14px 16px;"><div style="font-size:13px;font-weight:700;color:#3c3489;margin-bottom:4px;">80G tax benefit incoming!</div><div style="font-size:12px;color:#534ab7;line-height:1.6;">Your donation qualifies for a deduction under <strong>Section 80G, Income Tax Act 1961</strong>. An official certificate will be emailed within <strong>7 working days</strong>.</div></td></tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background-color:#ffffff;border-left:2px solid #ed93b1;border-right:2px solid #ed93b1;padding:0 28px 24px;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#e1f5ee;border:1.5px solid #5dcaa5;border-radius:20px;">
+                <tr>
+                  <td style="padding:18px 20px;">
+                    <p style="margin:0 0 14px;font-size:14px;font-weight:700;color:#085041;text-align:center;">Your impact at a glance &#10022;</p>
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                      <tr>
+                        <td class="impact-cell" align="center" style="padding:0 8px;"><div style="font-size:26px;font-weight:700;color:#0f6e56;">${impactMeals}</div><div style="font-size:11px;color:#1d9e75;font-weight:600;">meals funded</div></td>
+                        <td align="center" width="1" style="background-color:#5dcaa5;padding:0;width:1px;"><div style="width:1px;height:48px;background:#5dcaa5;"></div></td>
+                        <td class="impact-cell" align="center" style="padding:0 8px;"><div style="font-size:26px;font-weight:700;color:#0f6e56;">${impactBooks}</div><div style="font-size:11px;color:#1d9e75;font-weight:600;">textbooks bought</div></td>
+                        <td align="center" width="1" style="background-color:#5dcaa5;padding:0;width:1px;"><div style="width:1px;height:48px;background:#5dcaa5;"></div></td>
+                        <td class="impact-cell" align="center" style="padding:0 8px;"><div style="font-size:26px;font-weight:700;color:#0f6e56;">${impactChildren}</div><div style="font-size:11px;color:#1d9e75;font-weight:600;">child supported</div></td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background-color:#ffffff;border-left:2px solid #ed93b1;border-right:2px solid #ed93b1;padding:0 28px 28px;">
+              <p style="margin:0 0 6px;font-size:14px;color:#5f5e5a;line-height:1.7;">If you have any questions about this transaction, please contact us at <a href="mailto:${safeSupportEmail}" style="color:#d4537e;text-decoration:none;font-weight:700;">${safeSupportEmail}</a> or call <strong style="color:#2c2c2a;">${safeSupportPhone}</strong>.</p>
+              <p style="margin:0 0 14px;font-size:14px;color:#5f5e5a;line-height:1.7;">With gratitude,<br><strong style="color:#2c2c2a;font-size:15px;">Team DEMO NGO</strong><br><span style="font-size:13px;color:#888780;">Feeding the hungry, one meal at a time</span></p>
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="border-radius:50px;background-color:#d4537e;"><a href="https://ngo-payment.vercel.app" target="_blank" style="display:inline-block;padding:12px 28px;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:50px;font-family:Arial,sans-serif;">Donate again &rarr;</a></td></tr></table>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="background-color:#f4c0d1;border-radius:0 0 24px 24px;padding:16px 28px;border:2px solid #ed93b1;border-top:none;">
+              <div style="margin-bottom:10px;">
+                <svg width="280" height="22" viewBox="0 0 280 22" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="14" cy="11" r="4" fill="#d4537e" opacity="0.7"/>
+                  <rect x="30" y="5" width="8" height="8" rx="2" fill="#534ab7" opacity="0.6" transform="rotate(20,34,9)"/>
+                  <circle cx="54" cy="14" r="3" fill="#1d9e75" opacity="0.7"/>
+                  <rect x="70" y="6" width="7" height="7" rx="1.5" fill="#ef9f27" opacity="0.6" transform="rotate(-15,73,9)"/>
+                  <circle cx="92" cy="10" r="4" fill="#378add" opacity="0.6"/>
+                  <rect x="108" y="7" width="8" height="8" rx="2" fill="#d85a30" opacity="0.6" transform="rotate(30,112,11)"/>
+                  <circle cx="130" cy="14" r="3" fill="#d4537e" opacity="0.7"/>
+                  <rect x="146" y="4" width="7" height="7" rx="2" fill="#7f77dd" opacity="0.6" transform="rotate(-25,149,7)"/>
+                  <circle cx="168" cy="11" r="4" fill="#1d9e75" opacity="0.7"/>
+                  <rect x="184" y="6" width="8" height="8" rx="2" fill="#ef9f27" opacity="0.5" transform="rotate(15,188,10)"/>
+                  <circle cx="206" cy="14" r="3" fill="#534ab7" opacity="0.6"/>
+                  <rect x="220" y="5" width="7" height="7" rx="1.5" fill="#d4537e" opacity="0.6" transform="rotate(-10,223,8)"/>
+                  <circle cx="244" cy="10" r="4" fill="#378add" opacity="0.6"/>
+                  <rect x="260" y="7" width="8" height="8" rx="2" fill="#1d9e75" opacity="0.6" transform="rotate(25,264,11)"/>
+                </svg>
+              </div>
+              <p style="margin:0 0 4px;font-size:12px;color:#72243e;font-weight:700;">Registered NGO · 12A / 80G Certified</p>
+              <p style="margin:0 0 8px;font-size:11px;color:#993556;">This is a system-generated receipt. No physical signature required.</p>
+              <p style="margin:0;font-size:11px;color:#b07090;">© 2026 DEMO NGO · <a href="https://ngo-payment.vercel.app/privacy" style="color:#993556;text-decoration:none;">Privacy policy</a> · <a href="https://ngo-payment.vercel.app/unsubscribe" style="color:#993556;text-decoration:none;">Unsubscribe</a></p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+    `;
+
+    if (providerToUse === 'resend') {
+      const emailResult = await resendClient.emails.send({
+        from: resendFromAddress,
+        to: email,
+        subject: 'Thank you for your donation! — DEMO NGO',
+        text: emailText,
+        html: emailHtml
+      });
+
+      if (emailResult?.error) {
+        throw new Error(`Resend API rejected email: ${JSON.stringify(emailResult.error)}`);
+      }
+
+      const messageId = emailResult?.data?.id || emailResult?.id || 'unknown';
+      logger.info(`Receipt email accepted by Resend (id=${messageId}) to ${safeEmail} from ${resendFromAddress} source=${source} attempt=${attempt}`);
+      return true;
     }
 
-    const messageId = emailResult?.data?.id || emailResult?.id || 'unknown';
-    logger.info(`Receipt email accepted by Resend (id=${messageId}) to ${safeEmail} from ${fromAddress}`);
+    const smtpInfo = await smtpTransporter.sendMail({
+      from: smtpFromAddress,
+      to: email,
+      subject: 'Thank you for your donation! — DEMO NGO',
+      text: emailText,
+      html: emailHtml
+    });
+
+    logger.info(`Receipt email accepted by SMTP (id=${smtpInfo.messageId || 'unknown'}) to ${safeEmail} from ${smtpFromAddress} source=${source} attempt=${attempt}`);
+    return true;
   } catch (err) {
     // FIX #15: Log the failure prominently so it can be followed up manually
-    logger.error(`IMPORTANT: Failed to send receipt email to ${email} for payment ${paymentId}. Manual follow-up required. Error: ${err.message}`);
+    logger.error(`IMPORTANT: Failed to send receipt email to ${email} for payment ${paymentId} source=${source} attempt=${attempt}. Provider=${emailProvider}. Error: ${err.message}`);
+    return false;
   }
 }
 
@@ -499,7 +820,7 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       );
 
       if (successUpdate.count > 0) {
-        sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+        enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment');
       } else {
         logger.info(`Receipt skipped in verify-payment: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -592,7 +913,7 @@ app.post('/api/webhook/razorpay', async (req, res, next) => {
           );
 
           if (successUpdate.count > 0) {
-            sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+            enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured');
             logger.info(`Webhook synced recovery: Payment captured ${razorpay_payment_id} for order ${razorpay_order_id}`);
           } else {
             logger.info(`Webhook captured ignored: Order ${razorpay_order_id} already transitioned to success.`);
@@ -711,7 +1032,7 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       );
 
       if (successUpdate.count > 0) {
-        sendReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id);
+        enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect');
       } else {
         logger.info(`Receipt skipped in redirect verify: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -1056,7 +1377,7 @@ cron.schedule('*/15 * * * *', async () => {
             { label: 'cron.update(success)' }
           );
           logger.info(`Cron Reconciled (Success): Order ${donation.razorpay_order_id}`);
-          sendReceiptEmail(donation.donor_name, donation.email, donation.amount, capturedPayment.id);
+          enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, capturedPayment.id, 'cron-reconciliation');
         } else if (failedPayment) {
           await withRetry(
             () => prisma.donation.update({
