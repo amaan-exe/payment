@@ -298,6 +298,9 @@ if (!resendFromAddress) {
 let smtpTransporter = null;
 const smtpFromAddress = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || '').trim();
 const smtpFromLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(smtpFromAddress);
+const SMTP_CONNECTION_TIMEOUT_MS = Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15000);
+const SMTP_GREETING_TIMEOUT_MS = Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10000);
+const SMTP_SOCKET_TIMEOUT_MS = Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 20000);
 
 if (process.env.SMTP_USER && process.env.SMTP_PASS) {
   const service = (process.env.SMTP_SERVICE || 'gmail').trim();
@@ -308,6 +311,9 @@ if (process.env.SMTP_USER && process.env.SMTP_PASS) {
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT || 587),
       secure: process.env.SMTP_SECURE === 'true',
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
@@ -315,6 +321,9 @@ if (process.env.SMTP_USER && process.env.SMTP_PASS) {
     }
     : {
       service,
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
@@ -370,6 +379,13 @@ async function enqueueReceiptEmail(donorName, email, amount, paymentId, source) 
     logger.error(`Unexpected email queue failure for payment ${paymentId}: ${err.message}`);
     return false;
   }
+}
+
+function triggerReceiptEmail(donorName, email, amount, paymentId, source) {
+  enqueueReceiptEmail(donorName, email, amount, paymentId, source)
+    .catch((err) => {
+      logger.error(`Unexpected async receipt trigger failure for payment ${paymentId} source=${source}: ${err.message}`);
+    });
 }
 
 async function sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source) {
@@ -684,6 +700,9 @@ DEMO NGO - Feeding the hungry, one meal at a time.
         port: Number(process.env.SMTP_PORT || 587),
         secure: process.env.SMTP_SECURE === 'true',
         requireTLS: process.env.SMTP_SECURE !== 'true',
+        connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+        greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+        socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
         auth: {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS
@@ -867,7 +886,7 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       );
 
       if (successUpdate.count > 0) {
-        await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment');
+        triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment');
       } else {
         logger.info(`Receipt skipped in verify-payment: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -960,7 +979,7 @@ app.post('/api/webhook/razorpay', async (req, res, next) => {
           );
 
           if (successUpdate.count > 0) {
-            await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured');
+            triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured');
             logger.info(`Webhook synced recovery: Payment captured ${razorpay_payment_id} for order ${razorpay_order_id}`);
           } else {
             logger.info(`Webhook captured ignored: Order ${razorpay_order_id} already transitioned to success.`);
@@ -1042,7 +1061,7 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       }
 
       if (donation.status === 'success') {
-        await enqueueReceiptEmail(
+        triggerReceiptEmail(
           donation.donor_name,
           donation.email,
           donation.amount,
@@ -1086,7 +1105,7 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       );
 
       if (successUpdate.count > 0) {
-        await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect');
+        triggerReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect');
       } else {
         logger.info(`Receipt skipped in redirect verify: Order ${razorpay_order_id} already transitioned.`);
       }
