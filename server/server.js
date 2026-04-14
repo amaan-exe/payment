@@ -340,29 +340,35 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function enqueueReceiptEmail(donorName, email, amount, paymentId, source) {
+async function enqueueReceiptEmail(donorName, email, amount, paymentId, source) {
   if (!paymentId) {
     logger.warn('Receipt email skipped: missing paymentId');
-    return;
+    return false;
   }
 
   const existingState = receiptEmailStateByPaymentId.get(paymentId);
   if (existingState === 'processing' || existingState === 'sent') {
     logger.info(`Receipt email deduped for payment ${paymentId} (state=${existingState}, source=${source})`);
-    return;
+    return existingState === 'sent';
   }
 
   receiptEmailStateByPaymentId.set(paymentId, 'processing');
-  setImmediate(() => {
-    sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source)
-      .then((wasSent) => {
-        receiptEmailStateByPaymentId.set(paymentId, wasSent ? 'sent' : 'failed');
-      })
-      .catch((err) => {
-        receiptEmailStateByPaymentId.set(paymentId, 'failed');
-        logger.error(`Unexpected email queue failure for payment ${paymentId}: ${err.message}`);
-      });
-  });
+  logger.info(`Receipt email queued for payment ${paymentId} source=${source}`);
+
+  try {
+    const wasSent = await sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source);
+    receiptEmailStateByPaymentId.set(paymentId, wasSent ? 'sent' : 'failed');
+    if (wasSent) {
+      logger.info(`Receipt email completed for payment ${paymentId} source=${source}`);
+    } else {
+      logger.warn(`Receipt email failed after retries for payment ${paymentId} source=${source}`);
+    }
+    return wasSent;
+  } catch (err) {
+    receiptEmailStateByPaymentId.set(paymentId, 'failed');
+    logger.error(`Unexpected email queue failure for payment ${paymentId}: ${err.message}`);
+    return false;
+  }
 }
 
 async function sendReceiptEmailWithRetry(donorName, email, amount, paymentId, source) {
@@ -820,7 +826,7 @@ app.post('/api/verify-payment', paymentLimiter, validateOrigin, async (req, res,
       );
 
       if (successUpdate.count > 0) {
-        enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment');
+        await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment');
       } else {
         logger.info(`Receipt skipped in verify-payment: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -913,7 +919,7 @@ app.post('/api/webhook/razorpay', async (req, res, next) => {
           );
 
           if (successUpdate.count > 0) {
-            enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured');
+            await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'webhook-captured');
             logger.info(`Webhook synced recovery: Payment captured ${razorpay_payment_id} for order ${razorpay_order_id}`);
           } else {
             logger.info(`Webhook captured ignored: Order ${razorpay_order_id} already transitioned to success.`);
@@ -995,6 +1001,13 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       }
 
       if (donation.status === 'success') {
+        await enqueueReceiptEmail(
+          donation.donor_name,
+          donation.email,
+          donation.amount,
+          donation.razorpay_payment_id || razorpay_payment_id,
+          'verify-payment-redirect-already-success'
+        );
         return res.redirect(303, `${dynamicFrontendUrl}/payment-success?payment_id=${razorpay_payment_id}&order_id=${razorpay_order_id}`);
       }
 
@@ -1032,7 +1045,7 @@ app.post('/api/verify-payment-redirect', express.urlencoded({ extended: true }),
       );
 
       if (successUpdate.count > 0) {
-        enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect');
+        await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, razorpay_payment_id, 'verify-payment-redirect');
       } else {
         logger.info(`Receipt skipped in redirect verify: Order ${razorpay_order_id} already transitioned.`);
       }
@@ -1377,7 +1390,7 @@ cron.schedule('*/15 * * * *', async () => {
             { label: 'cron.update(success)' }
           );
           logger.info(`Cron Reconciled (Success): Order ${donation.razorpay_order_id}`);
-          enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, capturedPayment.id, 'cron-reconciliation');
+          await enqueueReceiptEmail(donation.donor_name, donation.email, donation.amount, capturedPayment.id, 'cron-reconciliation');
         } else if (failedPayment) {
           await withRetry(
             () => prisma.donation.update({
