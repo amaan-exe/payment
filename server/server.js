@@ -288,6 +288,29 @@ if (process.env.RESEND_API_KEY) {
 
 const resendFromAddress = (process.env.RESEND_FROM_EMAIL || '').trim();
 const resendSenderLooksValid = /^.+<[^\s@]+@[^\s@]+\.[^\s@]+>$|^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resendFromAddress);
+const RESEND_ONBOARDING_FROM = 'DEMO NGO <onboarding@resend.dev>';
+
+function extractEmailAddress(fromValue) {
+  if (!fromValue || typeof fromValue !== 'string') return '';
+  const match = fromValue.match(/<([^>]+)>/);
+  return (match ? match[1] : fromValue).trim().toLowerCase();
+}
+
+function resolveResendFromAddress() {
+  const configuredAddress = extractEmailAddress(resendFromAddress);
+  const configuredDomain = configuredAddress.includes('@') ? configuredAddress.split('@')[1] : '';
+  const consumerDomains = new Set(['gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'live.com', 'icloud.com']);
+
+  if (!resendSenderLooksValid || !configuredDomain) {
+    return RESEND_ONBOARDING_FROM;
+  }
+
+  if (consumerDomains.has(configuredDomain)) {
+    return RESEND_ONBOARDING_FROM;
+  }
+
+  return resendFromAddress;
+}
 
 if (!resendFromAddress) {
   logger.warn('RESEND_FROM_EMAIL is not set. Configure a verified sender (example: "DEMO NGO <donations@yourdomain.com>").');
@@ -475,7 +498,8 @@ async function sendReceiptEmailWithRetry(donorName, email, amount, paymentId, so
 
 // FIX #15: Track email failures and log them
 async function sendReceiptEmail(donorName, email, amount, paymentId, source, attempt) {
-  const canUseResend = resendClient && resendFromAddress && resendSenderLooksValid;
+  const resendFromResolved = resolveResendFromAddress();
+  const canUseResend = Boolean(resendClient && resendFromResolved);
   const canUseSmtp = smtpTransporter && smtpFromLooksValid;
 
   if (!canUseResend && !canUseSmtp) {
@@ -718,7 +742,7 @@ DEMO NGO - Feeding the hungry, one meal at a time.
 
     if (providerToUse === 'resend') {
       const emailResult = await resendClient.emails.send({
-        from: resendFromAddress,
+        from: resendFromResolved,
         to: email,
         subject: 'Thank you for your donation! — DEMO NGO',
         text: emailText,
@@ -730,7 +754,7 @@ DEMO NGO - Feeding the hungry, one meal at a time.
       }
 
       const messageId = emailResult?.data?.id || emailResult?.id || 'unknown';
-      logger.info(`Receipt email accepted by Resend (id=${messageId}) to ${safeEmail} from ${resendFromAddress} source=${source} attempt=${attempt}`);
+      logger.info(`Receipt email accepted by Resend (id=${messageId}) to ${safeEmail} from ${resendFromResolved} source=${source} attempt=${attempt}`);
       return true;
     }
 
@@ -746,16 +770,43 @@ DEMO NGO - Feeding the hungry, one meal at a time.
     try {
       smtpInfo = await smtpTransporter.sendMail(smtpMail);
     } catch (smtpErr) {
-      const isIpv6Unreachable =
-        smtpErr?.code === 'ENETUNREACH' &&
-        (String(smtpErr?.message || '').includes('connect ENETUNREACH') || String(smtpErr?.message || '').includes(':::0'));
-
+      const smtpErrorText = `${smtpErr?.code || ''} ${smtpErr?.message || ''}`.toLowerCase();
+      const isNetworkStyleError = /(enetunreach|ehostunreach|etimedout|timeout|socket|network)/.test(smtpErrorText);
       const smtpService = (process.env.SMTP_SERVICE || 'gmail').trim().toLowerCase();
-      if (!isIpv6Unreachable || smtpService !== 'gmail') {
+      if (isNetworkStyleError && smtpService === 'gmail') {
+        // Render environments may not have stable outbound IPv6 routing. Retry once via resolved IPv4.
+        logger.warn(`SMTP network error for payment ${paymentId}; retrying via IPv4 fallback. Error: ${smtpErr.message}`);
+        const fallbackHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+        const ipv4Addresses = await dns.resolve4(fallbackHost);
+
+        if (!ipv4Addresses || ipv4Addresses.length === 0) {
+          throw new Error(`SMTP IPv4 fallback failed: no A records found for ${fallbackHost}`);
+        }
+
+        const fallbackTransporter = nodemailer.createTransport({
+          host: ipv4Addresses[0],
+          port: Number(process.env.SMTP_PORT || 587),
+          secure: process.env.SMTP_SECURE === 'true',
+          requireTLS: process.env.SMTP_SECURE !== 'true',
+          connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+          greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+          socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+          auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS
+          },
+          tls: {
+            servername: fallbackHost
+          }
+        });
+
+        smtpInfo = await fallbackTransporter.sendMail(smtpMail);
+        logger.info(`SMTP IPv4 fallback succeeded for payment ${paymentId} using ${ipv4Addresses[0]}.`);
+      } else {
         if (canUseResend) {
           logger.warn(`SMTP send failed for payment ${paymentId}; attempting Resend fallback. Error: ${smtpErr.message}`);
           const fallbackResend = await resendClient.emails.send({
-            from: resendFromAddress,
+            from: resendFromResolved,
             to: email,
             subject: 'Thank you for your donation! — DEMO NGO',
             text: emailText,
@@ -773,35 +824,6 @@ DEMO NGO - Feeding the hungry, one meal at a time.
 
         throw smtpErr;
       }
-
-      // Render environments may not have outbound IPv6 routing. Retry once via resolved IPv4.
-      logger.warn(`SMTP IPv6 route unavailable for payment ${paymentId}; retrying via IPv4 fallback.`);
-      const fallbackHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
-      const ipv4Addresses = await dns.resolve4(fallbackHost);
-
-      if (!ipv4Addresses || ipv4Addresses.length === 0) {
-        throw new Error(`SMTP IPv4 fallback failed: no A records found for ${fallbackHost}`);
-      }
-
-      const fallbackTransporter = nodemailer.createTransport({
-        host: ipv4Addresses[0],
-        port: Number(process.env.SMTP_PORT || 587),
-        secure: process.env.SMTP_SECURE === 'true',
-        requireTLS: process.env.SMTP_SECURE !== 'true',
-        connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
-        greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
-        socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS
-        },
-        tls: {
-          servername: fallbackHost
-        }
-      });
-
-      smtpInfo = await fallbackTransporter.sendMail(smtpMail);
-      logger.info(`SMTP IPv4 fallback succeeded for payment ${paymentId} using ${ipv4Addresses[0]}.`);
     }
 
     logger.info(`Receipt email accepted by SMTP (id=${smtpInfo.messageId || 'unknown'}) to ${safeEmail} from ${smtpFromAddress} source=${source} attempt=${attempt}`);
