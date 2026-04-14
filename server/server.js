@@ -282,6 +282,10 @@ if (process.env.RESEND_API_KEY) {
   logger.info('Email client configured (Resend API)');
 }
 
+if (!process.env.RESEND_FROM_EMAIL) {
+  logger.warn('RESEND_FROM_EMAIL is not set. Using onboarding@resend.dev may reduce deliverability outside testing.');
+}
+
 // FIX #15: Track email failures and log them
 async function sendReceiptEmail(donorName, email, amount, paymentId) {
   if (!resendClient) {
@@ -298,7 +302,7 @@ async function sendReceiptEmail(donorName, email, amount, paymentId) {
 
     const fromAddress = process.env.RESEND_FROM_EMAIL || 'DEMO NGO <onboarding@resend.dev>';
 
-    await resendClient.emails.send({
+    const emailResult = await resendClient.emails.send({
       from: fromAddress,
       to: email,
       subject: 'Thank you for your donation! — DEMO NGO',
@@ -321,7 +325,13 @@ async function sendReceiptEmail(donorName, email, amount, paymentId) {
         </div>
       `
     });
-    logger.info(`Receipt email sent to ${safeEmail}`);
+
+    if (emailResult?.error) {
+      throw new Error(`Resend API rejected email: ${JSON.stringify(emailResult.error)}`);
+    }
+
+    const messageId = emailResult?.data?.id || emailResult?.id || 'unknown';
+    logger.info(`Receipt email accepted by Resend (id=${messageId}) to ${safeEmail} from ${fromAddress}`);
   } catch (err) {
     // FIX #15: Log the failure prominently so it can be followed up manually
     logger.error(`IMPORTANT: Failed to send receipt email to ${email} for payment ${paymentId}. Manual follow-up required. Error: ${err.message}`);
